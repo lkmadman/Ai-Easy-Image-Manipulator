@@ -17,14 +17,19 @@ export enum EditMode {
   SELECT = 'SELECT', // Default box selection
   ERASE = 'ERASE',   // Refine mask
   TEXT = 'TEXT',     // Add Text mode
+  INSPECT = 'INSPECT', // Image Inspection (Zoom/Pan)
+  REFERENCE = 'REFERENCE' // Reference positioning mode
 }
 
 export enum EditTab {
   CORE = 'CORE',
   PORTRAIT = 'PORTRAIT',
   CREATIVE = 'CREATIVE',
-  PRODUCT = 'PRODUCT'
+  PRODUCT = 'PRODUCT',
+  REVIEW = 'REVIEW'
 }
+
+export type InspectorOverlay = 'none' | 'grid' | 'exposure';
 
 export interface ApiError {
   message: string;
@@ -60,6 +65,22 @@ export interface TextOverlay {
   shadowColor?: string;
   shadowBlur?: number;
   isDragging?: boolean;
+}
+
+export interface ReferenceOverlayState {
+  url: string;
+  opacity: number;
+  x: number; // 0-1 relative to canvas width (screen space for overlay) or image space? Let's use image space relative
+  y: number;
+  scale: number;
+  isDragging?: boolean;
+}
+
+export interface QuickLabel {
+  id: string;
+  text: string;
+  x: number; // Image coordinates
+  y: number;
 }
 
 export interface AppError {

@@ -8,13 +8,29 @@ import {
   Eye, Monitor, EyeOff, LayoutTemplate, Brush, AlertTriangle, XCircle, Move,
   Type as TypeIcon, FileText, WifiOff, HelpCircle, X, Moon, Grid, Instagram, Share2, Plus, ArrowRight,
   Smile, UserCheck, Droplet, Crown, CloudSun, Snowflake, Sunset, MonitorPlay, Coins, 
-  Smartphone, Aperture, Layout, Palette as PaletteIcon, MessageCircle, Play
+  Smartphone, Aperture, Layout, Palette as PaletteIcon, MessageCircle, Play, ZoomIn, Search, Eye as EyeIcon, 
+  Maximize, Activity, AlertCircle, RefreshCw, Pin
 } from 'lucide-react';
 import { ImageEditor, ImageEditorHandle } from './components/ImageEditor';
 import { LoadingSpinner } from './components/LoadingSpinner';
 import { fileToBase64, cropImage, applyAlphaMask, downloadImage } from './utils/imageUtils';
 import { editImageWithGemini, analyzeSelection, generateSegmentationMask, analyzeGlobalImage, generateSocialCaption, generateVideoFromImage } from './services/geminiService';
-import { HistoryItem, SelectionBox, EditMode, PromptSuggestion, ExportFormat, GlobalAnalysisResult, TextOverlay, AppError, BatchItem, AppTheme, EditTab } from './types';
+import { HistoryItem, SelectionBox, EditMode, PromptSuggestion, ExportFormat, GlobalAnalysisResult, TextOverlay, AppError, BatchItem, AppTheme, EditTab, InspectorOverlay, ReferenceOverlayState, QuickLabel } from './types';
+
+// Preset Scenes
+const SCENES = [
+  { label: "Luxury Garden", icon: "🌿" },
+  { label: "Cyberpunk City", icon: "🌃" },
+  { label: "Beach Dawn", icon: "🌅" },
+  { label: "City Night Neon", icon: "🌆" },
+  { label: "Classic Studio", icon: "📷" },
+  { label: "Temple Courtyard", icon: "🏯" },
+  { label: "Forest Mist", icon: "🌲" },
+  { label: "Desert Sunset", icon: "🏜️" },
+  { label: "Royal Hall", icon: "👑" },
+  { label: "Minimal Mono", icon: "⚪" },
+  { label: "Festive Lights", icon: "✨" },
+];
 
 function App() {
   const [theme, setTheme] = useState<AppTheme>('dark');
@@ -37,6 +53,9 @@ function App() {
   const [errorState, setErrorState] = useState<AppError | null>(null);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [showHelp, setShowHelp] = useState(false);
+  
+  // Auto-Fix / Notifications
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Analysis State
   const [isAnalyzingGlobal, setIsAnalyzingGlobal] = useState(false);
@@ -48,15 +67,26 @@ function App() {
   const [isIdentifying, setIsIdentifying] = useState(false);
   const [identifiedInfo, setIdentifiedInfo] = useState<{label: string, material: string, color: string}>({ label: "", material: "", color: "" });
   
-  // Style Reference
+  // Style Reference & Overlay
   const [styleReference, setStyleReference] = useState<string | null>(null);
   const [styleRefFeatures, setStyleRefFeatures] = useState<string[]>([]);
+  const [referenceOverlay, setReferenceOverlay] = useState<ReferenceOverlayState | null>(null);
+  const [showReferenceUI, setShowReferenceUI] = useState(false);
+
+  // Quick Labels
+  const [quickLabels, setQuickLabels] = useState<QuickLabel[]>([]);
+  const [quickLabelInput, setQuickLabelInput] = useState("");
 
   // Cleanup Mode State
   const [isCleanupMode, setIsCleanupMode] = useState(false);
 
   // Text Mode State
   const [textOverlay, setTextOverlay] = useState<TextOverlay | null>(null);
+
+  // Inspector State (Review Tab)
+  const [inspectorOverlay, setInspectorOverlay] = useState<InspectorOverlay>('none');
+  const [zoomLevel, setZoomLevel] = useState<number | 'fit'>('fit');
+  const [qualityIssues, setQualityIssues] = useState<string[] | null>(null);
 
   // Storytelling State
   const [generatedStory, setGeneratedStory] = useState<string | null>(null);
@@ -66,7 +96,7 @@ function App() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const styleInputRef = useRef<HTMLInputElement>(null);
-  const batchInputRef = useRef<HTMLInputElement>(null);
+  const referenceInputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<ImageEditorHandle>(null);
 
   // Computed current image
@@ -81,52 +111,22 @@ function App() {
     }
   }, []);
 
-  // Offline Listeners
+  // Workspace Auto-Fix Monitor
   useEffect(() => {
-    const handleOnline = () => setIsOffline(false);
-    const handleOffline = () => setIsOffline(true);
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    return () => {
-        window.removeEventListener('online', handleOnline);
-        window.removeEventListener('offline', handleOffline);
-    };
-  }, []);
+      // 1. Ghost Image Check
+      if (history.length === 0 && currentImage) {
+          clearMainImage();
+          showToast("Workspace Auto-Fixed: Cleared ghost image");
+      }
+      // 2. Selection Mode Fix
+      if (mode === EditMode.SELECT && !currentImage) {
+          setMode(EditMode.VIEW);
+      }
+  }, [history, currentImage, mode]);
 
-  // Global Analysis
-  useEffect(() => {
-     if (history.length === 1 && currentIndex === 0 && !globalAnalysis && !isAnalyzingGlobal) {
-        performGlobalAnalysis(history[0].dataUrl);
-     }
-  }, [history, currentIndex]);
-
-  const handleError = (error: any, retryAction?: () => void) => {
-      console.error(error);
-      const msg = error.message || "Something went wrong.";
-      const isSafety = msg.includes("safety") || msg.includes("filters") || msg.includes("IMAGE_OTHER") || msg.includes("recitation") || msg.includes("copyright");
-      
-      setErrorState({
-          title: isSafety ? "Content Filtered" : "Oops!",
-          message: isSafety 
-            ? "This edit was blocked by safety or copyright filters. Please try a different prompt or image." 
-            : msg.includes("500") ? "Our AI artists are currently overwhelmed. Please try again." : msg,
-          retry: retryAction
-      });
-  };
-
-  const performGlobalAnalysis = async (base64: string) => {
-    setIsAnalyzingGlobal(true);
-    try {
-        const result = await analyzeGlobalImage(base64);
-        setGlobalAnalysis(result);
-        // Auto-switch tabs based on category
-        if (result?.category === 'Human') setActiveTab(EditTab.PORTRAIT);
-        if (result?.category === 'Product') setActiveTab(EditTab.PRODUCT);
-    } catch(e) {
-        console.warn("Analysis failed silently");
-    } finally {
-        setIsAnalyzingGlobal(false);
-    }
+  const showToast = (msg: string) => {
+      setToastMessage(msg);
+      setTimeout(() => setToastMessage(null), 3000);
   };
 
   const clearMainImage = () => {
@@ -137,7 +137,39 @@ function App() {
       setGeneratedStory(null);
       setCurrentSelection(null);
       setStyleReference(null);
+      setTextOverlay(null);
+      setSuggestions([]);
+      setReferenceOverlay(null);
+      setQuickLabels([]);
+      setIdentifiedInfo({ label: "", material: "", color: "" });
       if (fileInputRef.current) fileInputRef.current.value = "";
+      // Force canvas clear via ref
+      editorRef.current?.forceRedraw();
+  };
+
+  const performGlobalAnalysis = async (base64: string) => {
+    setIsAnalyzingGlobal(true);
+    try {
+        const result = await analyzeGlobalImage(base64);
+        setGlobalAnalysis(result);
+        if (result?.category === 'Human') setActiveTab(EditTab.PORTRAIT);
+        if (result?.category === 'Product') setActiveTab(EditTab.PRODUCT);
+    } catch(e) {
+        console.warn("Analysis failed silently");
+    } finally {
+        setIsAnalyzingGlobal(false);
+    }
+  };
+
+  const handleError = (error: any, retry?: () => void) => {
+    console.error("App Error:", error);
+    const msg = error instanceof Error ? error.message : "An unexpected error occurred";
+    setErrorState({
+        title: "Error",
+        message: msg,
+        retry: retry
+    });
+    showToast(msg);
   };
 
   // Identification Logic
@@ -169,26 +201,9 @@ function App() {
   }, [currentImage, currentSelection, isCleanupMode]);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      if (e.target.files.length > 1) {
-          // Batch upload
-          const newQueue: BatchItem[] = [];
-          for (let i = 0; i < e.target.files.length; i++) {
-              const file = e.target.files[i];
-              try {
-                  const base64 = await fileToBase64(file);
-                  newQueue.push({ id: `img-${Date.now()}-${i}`, file, previewUrl: base64, status: 'pending' });
-              } catch (e) {}
-          }
-          setBatchQueue(newQueue);
-          setIsBatchMode(true);
-          // Load first image to editor
-          setHistory([{ dataUrl: newQueue[0].previewUrl, timestamp: Date.now() }]);
-          setCurrentIndex(0);
-      } else if (e.target.files[0]) {
-        const file = e.target.files[0];
+    if (e.target.files && e.target.files[0]) {
         try {
-          const base64 = await fileToBase64(file);
+          const base64 = await fileToBase64(e.target.files[0]);
           setHistory([{ dataUrl: base64, timestamp: Date.now() }]);
           setCurrentIndex(0);
           setPrompt("");
@@ -207,8 +222,25 @@ function App() {
         } catch (err) {
           handleError(err);
         }
-      }
     }
+  };
+
+  const handleReferenceUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (e.target.files && e.target.files[0]) {
+          try {
+              const base64 = await fileToBase64(e.target.files[0]);
+              setReferenceOverlay({
+                  url: base64,
+                  opacity: 0.5,
+                  x: 0,
+                  y: 0,
+                  scale: 0.5,
+                  isDragging: false
+              });
+              setMode(EditMode.REFERENCE);
+              setShowReferenceUI(true);
+          } catch(err) { handleError(err); }
+      }
   };
 
   const handleStyleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -223,28 +255,9 @@ function App() {
       }
   };
 
-  const toggleStyleFeature = (feature: string) => {
-      setStyleRefFeatures(prev => 
-          prev.includes(feature) ? prev.filter(f => f !== feature) : [...prev, feature]
-      );
-  };
-
-  const handleUndo = () => {
-    if (currentIndex > 0) {
-      setCurrentIndex(prev => prev - 1);
-      setCurrentSelection(null);
-      setTextOverlay(null);
-      setGeneratedStory(null);
-    }
-  };
-
-  const handleRedo = () => {
-    if (currentIndex < history.length - 1) {
-      setCurrentIndex(prev => prev + 1);
-      setCurrentSelection(null);
-      setTextOverlay(null);
-      setGeneratedStory(null);
-    }
+  const handleAddQuickLabel = (text: string) => {
+      setQuickLabels(prev => [...prev, { id: Date.now().toString(), text, x: 100 + prev.length * 20, y: 100 + prev.length * 20 }]);
+      setQuickLabelInput("");
   };
 
   const handleGenerate = async (forcedPrompt?: string, invertMask: boolean = false) => {
@@ -252,7 +265,7 @@ function App() {
     if (!currentImage || !promptToUse.trim()) return;
 
     if (isOffline) {
-        setErrorState({ title: "No Connection", message: "You are offline. Check your internet connection." });
+        setErrorState({ title: "No Connection", message: "You are offline." });
         return;
     }
 
@@ -294,37 +307,15 @@ function App() {
     execute();
   };
 
+  const handleUndo = () => currentIndex > 0 && setCurrentIndex(prev => prev - 1);
+  const handleRedo = () => currentIndex < history.length - 1 && setCurrentIndex(prev => prev + 1);
+  
   const handleAutoSelect = async (tag: string) => {
       if (!currentImage) return;
       setIsProcessing(true);
       try {
           const maskBase64 = await generateSegmentationMask(currentImage, tag);
-          // We need to load this mask into the editor. 
-          // Since the editor manages its own mask canvas, we can't directly push the mask into it easily 
-          // without an imperative method. 
-          // For now, we will just use it as a mask for the NEXT generation immediately, essentially "selecting" it in logic.
-          // Or, better, allow "Immediate Action" on the tag.
-          
-          // Let's assume for this feature, clicking "Select" on a tag just generates the mask 
-          // and sets the mode to VIEW so the user sees the mask overlay if we had a way to inject it.
-          // Limitation: The ImageEditor doesn't currently support setting an external mask image via props after init easily.
-          // Workaround: We will use the mask to immediately prompt for "Extract" or "Remove".
-          
-          // But the user asked for "Select". We can hack this by updating the history with the mask applied visually? 
-          // No, that changes the image.
-          // Let's simply trigger a generate call that USES the mask for a common action, 
-          // or just notify the user that "Selection" needs manual box for now or implement mask injection.
-          // Since we can't easily inject mask into the current canvas implementation without a big refactor,
-          // We will offer "Auto Extract [Tag]" action instead.
-          
-          // Let's implement "Auto Masking" properly in a future update. For now, we will perform an action using the mask.
-          const res = await editImageWithGemini(currentImage, "Highlight this object", maskBase64, false);
-          // Wait, actually, let's just use it to "Keep Only" (Extract) as a demo of selection.
-          // Or better: prompt the user what to do with the selection.
           setPrompt(`Selected ${tag}. Describe edit...`);
-          // We store the mask temporarily?
-          // For simplicity in this iteration, we'll just run an "Enhance [Tag]" which uses the mask internally.
-          // We'll call a specialized function.
           const enhanced = await editImageWithGemini(currentImage, `Enhance the appearance of the ${tag}`, maskBase64, false);
            const newItem: HistoryItem = {
               dataUrl: enhanced,
@@ -333,7 +324,6 @@ function App() {
             };
             setHistory(prev => [...prev.slice(0, currentIndex + 1), newItem]);
             setCurrentIndex(prev => prev + 1);
-
       } catch(e) {
           handleError(e);
       } finally {
@@ -357,20 +347,17 @@ function App() {
              maskBase64 = editorRef.current.getMaskDataUrl() || undefined;
           }
 
-          // 1. Edit Image
           const newImageBase64 = await editImageWithGemini(
               currentImage, 
               promptText, 
               maskBase64, 
-              false, // Standard mask behavior (edit selection or global)
+              false, 
               undefined,
               styleRefFeatures
           );
           
-          // 2. Generate Caption
           const caption = await generateSocialCaption(newImageBase64, theme);
           
-          // 3. Update State
           const newItem: HistoryItem = {
               dataUrl: newImageBase64,
               timestamp: Date.now(),
@@ -387,27 +374,6 @@ function App() {
       }
   };
 
-  const handleVideoGeneration = async () => {
-      if (!currentImage) return;
-      if (isOffline) return;
-      
-      setIsProcessing(true);
-      try {
-          const videoUrl = await generateVideoFromImage(currentImage, prompt || "Cinematic slow motion pan, high quality video");
-          // Download directly
-          const link = document.createElement('a');
-          link.href = videoUrl;
-          link.download = `nano-video-${Date.now()}.mp4`;
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-      } catch(err) {
-          handleError(err);
-      } finally {
-          setIsProcessing(false);
-      }
-  };
-
   const handleVirtualModel = async (modelType: string) => {
       if (!currentSelection) {
           handleError({ message: "Please select the clothing item first using the Select tool." });
@@ -415,15 +381,6 @@ function App() {
       }
       const promptText = `Generate a photorealistic full body ${modelType} model wearing this specific clothing item. The clothing must remain exactly as selected. Generate the rest of the body, face, and a professional studio background.`;
       await handleGenerate(promptText, true); 
-  };
-
-  const handleTagClick = (tag: string) => {
-    setPrompt(prev => {
-        const p = prev.trim();
-        if (!p) return `Enhance the ${tag}`; 
-        if (p.endsWith(' ')) return p + tag;
-        return p + ' ' + tag; 
-    });
   };
 
   const handleAddTextMode = (presetText?: string, presetColor?: string) => {
@@ -443,45 +400,15 @@ function App() {
       setCurrentSelection(null);
   };
 
-  const handleApplyText = () => {
-      if (!editorRef.current) return;
-      const canvasUrl = editorRef.current.getCanvasDataUrl();
-      if (canvasUrl) {
-          const newItem: HistoryItem = {
-              dataUrl: canvasUrl,
-              timestamp: Date.now(),
-              prompt: "Add text overlay"
-          };
-          const newHistory = [...history.slice(0, currentIndex + 1), newItem];
-          setHistory(newHistory);
-          setCurrentIndex(newHistory.length - 1);
-          setMode(EditMode.VIEW);
-          setTextOverlay(null);
-      }
-  };
-
-  const handleRemoveWatermark = () => {
-      setMode(EditMode.SELECT);
-      setIsCleanupMode(true);
-      setPrompt("Reconstruct the background in the selected area to seamlessly remove text and watermarks");
-  };
-
-  const handleDownload = () => {
-    if (!currentImage) return;
-    if (exportFormat === 'mp4') {
-        handleVideoGeneration();
-    } else {
-        downloadImage(currentImage, `nano-edit-${Date.now()}`, exportFormat);
-    }
-  };
-
+  const handleDownload = () => { if (currentImage) downloadImage(currentImage, `nano-edit`, exportFormat); };
   const appendToPrompt = (text: string) => setPrompt(prev => prev.trim() ? prev.trim() + ". " + text : text);
+  const handleAnalyzeQuality = async () => { if (globalAnalysis) setQualityIssues(globalAnalysis.anomalies); };
 
-  // --- TAB RENDERERS ---
+  // --- Render Functions ---
 
   const renderCoreTab = () => (
       <div className="space-y-4 animate-in fade-in slide-in-from-left-4 duration-300">
-           {/* REPLACED Essential Tools with Smart Selection */}
+           {/* Smart Selection */}
            <div>
               <h3 className="panel-title flex items-center gap-2"><Scan className="w-3 h-3 text-blue-500"/> Smart Selection</h3>
               <p className="text-[10px] text-gray-400 mb-2">Auto-detect and enhance objects</p>
@@ -536,7 +463,7 @@ function App() {
                   </button>
               </div>
           </div>
-
+          
           <div>
              <h3 className="panel-title flex items-center gap-2"><Briefcase className="w-3 h-3 text-purple-400"/> Wardrobe & Style</h3>
              <div className="space-y-2">
@@ -559,83 +486,38 @@ function App() {
 
   const renderCreativeTab = () => (
       <div className="space-y-5 animate-in fade-in slide-in-from-left-4 duration-300">
-          
           {/* AI Scene Storytelling */}
           <div className="bg-gradient-to-br from-indigo-500/10 to-purple-500/10 p-3 rounded-lg border border-indigo-500/20">
                <h3 className="panel-title flex items-center gap-2 text-indigo-500 dark:text-indigo-400">
                    <MessageCircle className="w-3 h-3"/> Scene Storytelling
                </h3>
-               <p className="text-[10px] text-gray-500 dark:text-slate-400 mb-2">Generate a themed scene and a matching story.</p>
-               <div className="grid grid-cols-2 gap-2">
-                   <button onClick={() => handleStoryGeneration("Luxury Garden")} className="tool-chip bg-white dark:bg-slate-800">
-                       🌿 Garden
-                   </button>
-                   <button onClick={() => handleStoryGeneration("Cyberpunk City")} className="tool-chip bg-white dark:bg-slate-800">
-                       🌃 Cyberpunk
-                   </button>
-                   <button onClick={() => handleStoryGeneration("Tropical Beach")} className="tool-chip bg-white dark:bg-slate-800">
-                       🏖️ Beach
-                   </button>
-                   <button onClick={() => handleStoryGeneration("Vintage Cafe")} className="tool-chip bg-white dark:bg-slate-800">
-                       ☕ Cafe
-                   </button>
+               <p className="text-[10px] text-gray-400 mb-2">Transport your subject to a new world.</p>
+               <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto custom-scrollbar">
+                   {SCENES.map((scene) => (
+                       <button 
+                         key={scene.label}
+                         onClick={() => handleStoryGeneration(scene.label)} 
+                         className="tool-chip bg-white dark:bg-slate-800 justify-start"
+                       >
+                           <span className="mr-1">{scene.icon}</span> {scene.label}
+                       </button>
+                   ))}
                </div>
           </div>
-
-          {/* Style Reference */}
-          <div className="bg-gray-50 dark:bg-slate-800 p-3 rounded-lg border border-gray-200 dark:border-slate-700 relative group">
+          
+           {/* Style Reference */}
+           <div className="bg-gray-50 dark:bg-slate-800 p-3 rounded-lg border border-gray-200 dark:border-slate-700">
               <h3 className="text-xs font-bold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
                   <Palette className="w-3 h-3"/> Style Reference
               </h3>
-              
-              <div className="flex items-center gap-2 mb-2">
-                  <div className="w-12 h-12 bg-gray-200 dark:bg-slate-700 rounded overflow-hidden flex-shrink-0 border border-gray-300 dark:border-slate-600 relative">
-                      {styleReference ? (
-                        <>
-                            <img src={styleReference} className="w-full h-full object-cover"/>
-                            <button onClick={() => { setStyleReference(null); setStyleRefFeatures([]); }} className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
-                                <X className="w-4 h-4 text-white"/>
-                            </button>
-                        </>
-                      ) : <div className="w-full h-full flex items-center justify-center text-xs text-gray-400">None</div>}
+              <div className="flex items-center gap-2">
+                  <div className="w-12 h-12 bg-gray-200 dark:bg-slate-700 rounded overflow-hidden flex-shrink-0 border border-gray-300 dark:border-slate-600">
+                      {styleReference ? <img src={styleReference} className="w-full h-full object-cover"/> : <div className="w-full h-full flex items-center justify-center text-xs text-gray-400">None</div>}
                   </div>
                   <button onClick={() => styleInputRef.current?.click()} className="text-xs bg-blue-600 text-white px-3 py-1.5 rounded hover:bg-blue-700 transition">
                       Upload Ref
                   </button>
                   <input type="file" ref={styleInputRef} onChange={handleStyleUpload} className="hidden" accept="image/*"/>
-              </div>
-
-              {styleReference && (
-                  <div className="space-y-1 animate-in fade-in">
-                      <p className="text-[10px] text-gray-400">Target Features:</p>
-                      <div className="flex flex-wrap gap-1">
-                          {['Skin', 'Attire', 'Face', 'Vibe'].map(feature => (
-                              <button
-                                key={feature}
-                                onClick={() => toggleStyleFeature(feature)}
-                                className={`text-[9px] px-2 py-0.5 rounded border transition ${styleRefFeatures.includes(feature) ? 'bg-blue-500 text-white border-blue-600' : 'bg-transparent text-gray-500 border-gray-300 dark:border-slate-600'}`}
-                              >
-                                  {feature}
-                              </button>
-                          ))}
-                      </div>
-                  </div>
-              )}
-          </div>
-
-          {/* Color Grading */}
-          <div>
-              <h3 className="panel-title">Color Grading</h3>
-              <div className="space-y-2">
-                  <button onClick={() => appendToPrompt("Apply cinematic color grading with teal and orange tones")} className="tool-row-btn">
-                      <Aperture className="w-4 h-4"/> Cinematic Teal/Orange
-                  </button>
-                  <button onClick={() => appendToPrompt("Apply moody, high contrast black and white style")} className="tool-row-btn">
-                      <Layout className="w-4 h-4"/> Moody B&W
-                  </button>
-                  <button onClick={() => appendToPrompt("Enhance image with vibrant colors and warm lighting")} className="tool-row-btn">
-                      <Sun className="w-4 h-4"/> Vibrant Warmth
-                  </button>
               </div>
           </div>
       </div>
@@ -643,23 +525,22 @@ function App() {
 
   const renderProductTab = () => (
       <div className="space-y-4 animate-in fade-in slide-in-from-left-4 duration-300">
-           
            {/* Virtual Model Generator */}
            <div className="bg-gradient-to-br from-green-500/10 to-teal-500/10 p-3 rounded-lg border border-green-500/20">
                 <h3 className="panel-title flex items-center gap-2 text-green-600 dark:text-green-400">
                     <User className="w-3 h-3"/> Virtual Model Studio
                 </h3>
-                <p className="text-[10px] text-gray-500 dark:text-slate-400 mb-2">Select clothing item first, then choose model.</p>
+                <p className="text-[10px] text-gray-400 mb-2">Select clothing item first.</p>
                 <div className="grid grid-cols-2 gap-2">
-                    <button disabled={!currentSelection} onClick={() => handleVirtualModel("female")} className="tool-chip bg-white dark:bg-slate-800 disabled:opacity-50">
+                    <button disabled={!currentSelection} onClick={() => handleVirtualModel("female")} className="tool-chip bg-white dark:bg-slate-800 justify-center disabled:opacity-50">
                         👩 Female Model
                     </button>
-                    <button disabled={!currentSelection} onClick={() => handleVirtualModel("male")} className="tool-chip bg-white dark:bg-slate-800 disabled:opacity-50">
+                    <button disabled={!currentSelection} onClick={() => handleVirtualModel("male")} className="tool-chip bg-white dark:bg-slate-800 justify-center disabled:opacity-50">
                         👨 Male Model
                     </button>
                 </div>
            </div>
-
+           
            <div>
               <h3 className="panel-title flex items-center gap-2"><ShoppingBag className="w-3 h-3 text-green-500"/> E-Commerce Tools</h3>
               <div className="grid grid-cols-1 gap-2">
@@ -669,27 +550,99 @@ function App() {
                  <button onClick={() => appendToPrompt("Add soft reflection and shadow at the bottom")} className="tool-row-btn">
                     <Droplet className="w-4 h-4"/> Reflection & Shadow
                  </button>
-                 <button onClick={() => appendToPrompt("Enhance product texture and sharpness for high quality catalog")} className="tool-row-btn">
-                    <Sparkles className="w-4 h-4"/> Texture Enhance
-                 </button>
+              </div>
+          </div>
+      </div>
+  );
+
+  const renderReferenceUI = () => (
+      <div className="absolute top-20 right-6 w-64 bg-white/90 dark:bg-slate-800/90 backdrop-blur border border-gray-200 dark:border-slate-700 rounded-lg shadow-xl p-3 z-30 animate-in fade-in slide-in-from-right-4">
+           <div className="flex justify-between items-center mb-2">
+               <h3 className="text-xs font-bold text-blue-500 uppercase flex items-center gap-2"><Layers className="w-3 h-3"/> Reference Layer</h3>
+               <button onClick={() => setShowReferenceUI(false)}><X className="w-3 h-3"/></button>
+           </div>
+           <div className="space-y-3">
+               <div>
+                   <label className="text-[10px] text-gray-500 block mb-1">Opacity</label>
+                   <input 
+                      type="range" min="0.1" max="1" step="0.1" 
+                      value={referenceOverlay?.opacity || 0.5} 
+                      onChange={e => referenceOverlay && setReferenceOverlay({...referenceOverlay, opacity: parseFloat(e.target.value)})}
+                      className="w-full h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                   />
+               </div>
+               <div>
+                   <label className="text-[10px] text-gray-500 block mb-1">Scale</label>
+                   <input 
+                      type="range" min="0.1" max="2" step="0.1" 
+                      value={referenceOverlay?.scale || 0.5} 
+                      onChange={e => referenceOverlay && setReferenceOverlay({...referenceOverlay, scale: parseFloat(e.target.value)})}
+                      className="w-full h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                   />
+               </div>
+               <button onClick={() => setReferenceOverlay(null)} className="w-full text-xs text-red-500 hover:bg-red-50 p-1 rounded">Remove Overlay</button>
+           </div>
+      </div>
+  );
+
+  const renderReviewTab = () => (
+      <div className="space-y-5 animate-in fade-in slide-in-from-left-4 duration-300">
+          
+          {/* Zoom Tools */}
+          <div>
+              <h3 className="panel-title flex items-center gap-2"><Search className="w-3 h-3 text-cyan-500"/> Inspector Tools</h3>
+              <div className="grid grid-cols-3 gap-2 mb-2">
+                  <button onClick={() => { setMode(EditMode.INSPECT); setZoomLevel('fit'); }} className={`tool-chip justify-center ${zoomLevel === 'fit' ? 'bg-cyan-100 dark:bg-cyan-900/30 border-cyan-500' : ''}`}>Fit</button>
+                  <button onClick={() => { setMode(EditMode.INSPECT); setZoomLevel(1); }} className={`tool-chip justify-center ${zoomLevel === 1 ? 'bg-cyan-100 dark:bg-cyan-900/30 border-cyan-500' : ''}`}>100%</button>
+                  <button onClick={() => { setMode(EditMode.INSPECT); setZoomLevel(2); }} className={`tool-chip justify-center ${zoomLevel === 2 ? 'bg-cyan-100 dark:bg-cyan-900/30 border-cyan-500' : ''}`}>200%</button>
               </div>
           </div>
 
+          {/* Quick Labels */}
           <div>
-              <h3 className="panel-title">Price Tags & Badges</h3>
+              <h3 className="panel-title flex items-center gap-2"><Pin className="w-3 h-3 text-orange-500"/> Quick Labels</h3>
+              <div className="flex gap-1 mb-2">
+                  <input 
+                    value={quickLabelInput} onChange={e => setQuickLabelInput(e.target.value)} 
+                    placeholder="Label..." className="flex-1 bg-gray-50 dark:bg-slate-800 text-xs p-1 rounded border border-gray-200 dark:border-slate-700"
+                  />
+                  <button onClick={() => handleAddQuickLabel(quickLabelInput)} disabled={!quickLabelInput} className="bg-orange-500 text-white px-2 rounded text-xs">+</button>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                  {['Hair', 'Skin', 'Fabric', 'Sky'].map(l => (
+                      <button key={l} onClick={() => handleAddQuickLabel(l)} className="text-[10px] bg-gray-100 dark:bg-slate-800 px-2 py-0.5 rounded border border-gray-200 hover:bg-orange-100">{l}</button>
+                  ))}
+                  {quickLabels.length > 0 && <button onClick={() => setQuickLabels([])} className="text-[10px] text-red-500 ml-auto">Clear</button>}
+              </div>
+          </div>
+
+          {/* Overlays */}
+          <div>
+              <h3 className="panel-title flex items-center gap-2"><EyeIcon className="w-3 h-3 text-yellow-500"/> Analysis & Fix</h3>
+              <div className="space-y-2">
+                  <button onClick={() => setInspectorOverlay(prev => prev === 'grid' ? 'none' : 'grid')} className={`tool-row-btn justify-between ${inspectorOverlay === 'grid' ? 'bg-yellow-50 dark:bg-yellow-900/20 border-yellow-500/50' : ''}`}>
+                      <span className="flex items-center gap-2"><Grid className="w-4 h-4"/> Composition Grid</span>
+                  </button>
+                  <button onClick={() => setInspectorOverlay(prev => prev === 'exposure' ? 'none' : 'exposure')} className={`tool-row-btn justify-between ${inspectorOverlay === 'exposure' ? 'bg-red-50 dark:bg-red-900/20 border-red-500/50' : ''}`}>
+                      <span className="flex items-center gap-2"><AlertCircle className="w-4 h-4"/> Exposure Warnings</span>
+                  </button>
+              </div>
+              {/* Fix Actions */}
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                  <button onClick={() => handleGenerate("Fix overexposed highlights and balance exposure", false)} className="tool-chip bg-slate-100 dark:bg-slate-800 text-[10px] justify-center">Fix Highlights</button>
+                  <button onClick={() => handleGenerate("Remove purple fringing and chromatic aberration", false)} className="tool-chip bg-slate-100 dark:bg-slate-800 text-[10px] justify-center">Fix Fringing</button>
+                  <button onClick={() => handleGenerate("Smooth gradient banding/dither", false)} className="tool-chip bg-slate-100 dark:bg-slate-800 text-[10px] justify-center">Fix Banding</button>
+                  <button onClick={() => handleGenerate("Sharpen details and remove blur", false)} className="tool-chip bg-slate-100 dark:bg-slate-800 text-[10px] justify-center">Sharpen</button>
+              </div>
+          </div>
+
+          {/* Workspace Fixes */}
+          <div className="bg-orange-50 dark:bg-orange-950/20 p-3 rounded border border-orange-200 dark:border-orange-900/50">
+              <h3 className="panel-title flex items-center gap-2 text-orange-600 dark:text-orange-400"><RefreshCw className="w-3 h-3"/> Auto-Repair</h3>
               <div className="grid grid-cols-2 gap-2">
-                  <button onClick={() => handleAddTextMode("$99.99", "#000000")} className="tool-chip justify-center">
-                      <Tag className="w-3 h-3"/> Price Tag
-                  </button>
-                  <button onClick={() => handleAddTextMode("SALE", "#ef4444")} className="tool-chip justify-center text-red-500 border-red-200">
-                      <Coins className="w-3 h-3"/> Sale Badge
-                  </button>
-                  <button onClick={() => handleAddTextMode("NEW", "#facc15")} className="tool-chip justify-center text-yellow-600 border-yellow-200">
-                      <Sparkles className="w-3 h-3"/> New Arrival
-                  </button>
-                  <button onClick={() => handleAddTextMode("50% OFF", "#3b82f6")} className="tool-chip justify-center text-blue-500 border-blue-200">
-                      <Tag className="w-3 h-3"/> Discount
-                  </button>
+                   <button onClick={() => { if (editorRef.current) editorRef.current.resetZoom(); setZoomLevel('fit'); }} className="tool-chip bg-white dark:bg-slate-800 justify-center">Reset View</button>
+                   <button onClick={() => { clearMainImage(); }} className="tool-chip bg-white dark:bg-slate-800 text-red-500 justify-center">Clear All</button>
+                   <button onClick={() => { setCompareToggle(false); setTimeout(() => setCompareToggle(true), 100); }} className="tool-chip bg-white dark:bg-slate-800 justify-center col-span-2">Resync Compare</button>
               </div>
           </div>
       </div>
@@ -697,28 +650,19 @@ function App() {
 
   const renderLeftPanel = () => (
       <aside className="w-80 bg-white dark:bg-slate-900 border-r border-gray-200 dark:border-slate-800 flex flex-col z-20 transition-colors shrink-0">
-          {/* Tabs */}
           <div className="flex p-2 gap-1 border-b border-gray-200 dark:border-slate-800 overflow-x-auto scrollbar-hide shrink-0">
-              <button onClick={() => setActiveTab(EditTab.CORE)} className={`px-4 py-2 rounded-lg text-xs font-bold transition whitespace-nowrap ${activeTab === EditTab.CORE ? 'bg-blue-500 text-white shadow-blue-500/20' : 'text-gray-500 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800'}`}>
-                  Core
-              </button>
-              <button onClick={() => setActiveTab(EditTab.PORTRAIT)} className={`px-4 py-2 rounded-lg text-xs font-bold transition whitespace-nowrap ${activeTab === EditTab.PORTRAIT ? 'bg-pink-500 text-white shadow-pink-500/20' : 'text-gray-500 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800'}`}>
-                  Portrait
-              </button>
-              <button onClick={() => setActiveTab(EditTab.CREATIVE)} className={`px-4 py-2 rounded-lg text-xs font-bold transition whitespace-nowrap ${activeTab === EditTab.CREATIVE ? 'bg-purple-500 text-white shadow-purple-500/20' : 'text-gray-500 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800'}`}>
-                  Creative
-              </button>
-              <button onClick={() => setActiveTab(EditTab.PRODUCT)} className={`px-4 py-2 rounded-lg text-xs font-bold transition whitespace-nowrap ${activeTab === EditTab.PRODUCT ? 'bg-green-500 text-white shadow-green-500/20' : 'text-gray-500 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800'}`}>
-                  Product
-              </button>
+              <button onClick={() => setActiveTab(EditTab.CORE)} className={`tab-btn ${activeTab === EditTab.CORE ? 'active' : ''}`}>Core</button>
+              <button onClick={() => setActiveTab(EditTab.PORTRAIT)} className={`tab-btn ${activeTab === EditTab.PORTRAIT ? 'active' : ''}`}>Portrait</button>
+              <button onClick={() => setActiveTab(EditTab.CREATIVE)} className={`tab-btn ${activeTab === EditTab.CREATIVE ? 'active' : ''}`}>Creative</button>
+              <button onClick={() => setActiveTab(EditTab.PRODUCT)} className={`tab-btn ${activeTab === EditTab.PRODUCT ? 'active' : ''}`}>Product</button>
+              <button onClick={() => { setActiveTab(EditTab.REVIEW); setMode(EditMode.INSPECT); }} className={`tab-btn ${activeTab === EditTab.REVIEW ? 'active-cyan' : ''}`}>Review</button>
           </div>
-
-          {/* Tool Content */}
           <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
               {activeTab === EditTab.CORE && renderCoreTab()}
               {activeTab === EditTab.PORTRAIT && renderPortraitTab()}
               {activeTab === EditTab.CREATIVE && renderCreativeTab()}
               {activeTab === EditTab.PRODUCT && renderProductTab()}
+              {activeTab === EditTab.REVIEW && renderReviewTab()}
           </div>
           
           {/* Analysis Footer */}
@@ -739,144 +683,14 @@ function App() {
       </aside>
   );
 
-  const renderRightPanel = () => (
-      <aside className="w-64 bg-white dark:bg-slate-900 border-l border-gray-200 dark:border-slate-800 flex flex-col z-20 p-4 transition-colors">
-          <div className="space-y-6">
-              
-              {/* Finish & Export */}
-              <div>
-                  <h3 className="panel-title flex items-center gap-2">
-                      <Download className="w-3 h-3"/> Finish & Export
-                  </h3>
-                  
-                  <div className="space-y-3">
-                      <div className="space-y-1">
-                          <label className="text-[10px] text-gray-400 uppercase">Format</label>
-                          <div className="flex bg-gray-100 dark:bg-slate-800 rounded p-1">
-                              {(['png', 'jpeg', 'webp', 'mp4'] as const).map(fmt => (
-                                  <button
-                                    key={fmt}
-                                    onClick={() => setExportFormat(fmt)}
-                                    className={`flex-1 text-xs py-1 rounded capitalize transition ${exportFormat === fmt ? 'bg-white dark:bg-slate-600 shadow text-blue-500 dark:text-blue-300 font-bold' : 'text-gray-500 hover:text-gray-700 dark:text-slate-400'}`}
-                                  >
-                                      {fmt}
-                                  </button>
-                              ))}
-                          </div>
-                      </div>
-
-                      <div className="space-y-1">
-                         <label className="text-[10px] text-gray-400 uppercase">Social Presets</label>
-                         <div className="grid grid-cols-2 gap-2">
-                             <button onClick={() => appendToPrompt("Crop to square aspect ratio for Instagram")} className="social-btn"><Instagram className="w-3 h-3"/> IG Post</button>
-                             <button onClick={() => appendToPrompt("Crop to 9:16 aspect ratio for Story")} className="social-btn"><Smartphone className="w-3 h-3"/> Story</button>
-                         </div>
-                      </div>
-                      
-                      <button 
-                         onClick={() => appendToPrompt("Enhance resolution, make it 4k, high fidelity")} 
-                         className="w-full py-2 bg-purple-500/10 text-purple-600 dark:text-purple-300 border border-purple-500/20 rounded hover:bg-purple-500/20 text-xs font-medium flex items-center justify-center gap-2"
-                      >
-                         <Sparkles className="w-3 h-3"/> Upscale (Enhance)
-                      </button>
-
-                      <div className="pt-4 border-t border-gray-200 dark:border-slate-800">
-                          <button 
-                            onClick={handleDownload} 
-                            disabled={isProcessing}
-                            className={`w-full font-bold py-2.5 rounded-lg flex items-center justify-center gap-2 shadow-lg transition-all hover:scale-[1.02] ${exportFormat === 'mp4' ? 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-500/20' : 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/20'}`}
-                          >
-                              {exportFormat === 'mp4' ? (
-                                  <><Play className="w-4 h-4"/> Generate Video</>
-                              ) : (
-                                  <><Download className="w-4 h-4"/> Export Image</>
-                              )}
-                          </button>
-                      </div>
-                  </div>
-              </div>
-
-              {/* Global Prompt */}
-              <div className="pt-2">
-                 <h3 className="panel-title">Prompt</h3>
-                 <textarea 
-                    value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
-                    placeholder={isCleanupMode ? "Describe what to remove..." : "Describe edit..."}
-                    className="w-full bg-gray-50 dark:bg-slate-950 border border-gray-300 dark:border-slate-700 rounded-lg p-3 text-sm focus:border-yellow-400 outline-none resize-none h-24 mb-2 text-gray-900 dark:text-gray-100"
-                 />
-                 <button
-                    onClick={() => handleGenerate(undefined, false)}
-                    disabled={!prompt || isProcessing}
-                    className="w-full bg-yellow-400 hover:bg-yellow-500 text-slate-900 font-bold py-2 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                 >
-                    {isProcessing ? "Processing..." : <><Wand2 className="w-4 h-4" /> Generate</>}
-                 </button>
-              </div>
-          </div>
-      </aside>
-  );
-
   return (
     <div className={`flex flex-col h-screen w-full transition-colors duration-300 ${theme === 'dark' ? 'bg-slate-950 text-slate-200' : 'bg-gray-50 text-gray-900'}`}>
       
-      {/* Offline Banner */}
-      {isOffline && (
-          <div className="bg-red-500 text-white text-xs font-bold text-center py-1 flex items-center justify-center gap-2">
-              <WifiOff className="w-3 h-3" /> You are currently offline
-          </div>
-      )}
-
-      {/* Error Modal */}
-      {errorState && (
-          <div className="absolute inset-0 z-[100] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
-              <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-xl shadow-2xl p-6 max-w-sm w-full animate-in fade-in zoom-in duration-300">
-                  <div className="flex items-center gap-2 text-red-500 dark:text-red-400 mb-2">
-                      <AlertTriangle className="w-6 h-6" />
-                      <h3 className="font-bold text-lg">{errorState.title}</h3>
-                  </div>
-                  <p className="text-gray-600 dark:text-slate-300 text-sm mb-4">{errorState.message}</p>
-                  <div className="flex gap-2">
-                      {errorState.retry && (
-                          <button onClick={() => { errorState.retry?.(); setErrorState(null); }} className="flex-1 bg-yellow-400 hover:bg-yellow-500 text-slate-900 font-bold py-2 rounded">Retry</button>
-                      )}
-                      <button onClick={() => setErrorState(null)} className="flex-1 bg-gray-200 dark:bg-slate-700 hover:bg-gray-300 dark:hover:bg-slate-600 text-gray-900 dark:text-white font-bold py-2 rounded">Dismiss</button>
-                  </div>
-              </div>
-          </div>
-      )}
-
-      {/* Help Modal */}
-      {showHelp && (
-          <div className="absolute inset-0 z-[100] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setShowHelp(false)}>
-              <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-xl shadow-2xl p-6 max-w-2xl w-full h-[80vh] overflow-y-auto animate-in fade-in zoom-in duration-300 relative" onClick={e => e.stopPropagation()}>
-                  <button onClick={() => setShowHelp(false)} className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 dark:hover:text-white"><X className="w-6 h-6"/></button>
-                  <h2 className="text-2xl font-bold mb-6 text-gray-900 dark:text-white flex items-center gap-2"><HelpCircle className="w-6 h-6 text-yellow-500"/> Help Center</h2>
-                  
-                  <div className="space-y-6">
-                      <section>
-                          <h3 className="text-lg font-bold mb-2 text-blue-500">Feature Guide</h3>
-                          <div className="grid grid-cols-2 gap-4 text-sm text-gray-600 dark:text-slate-300">
-                              <div>
-                                  <strong className="block text-gray-900 dark:text-white mb-1">Portrait Studio</strong>
-                                  Retouch skin, whiten teeth, fix poses, or change outfits to business attire.
-                              </div>
-                              <div>
-                                  <strong className="block text-gray-900 dark:text-white mb-1">Creative Mode</strong>
-                                  Change backgrounds to summer/winter, apply cinematic color grading, or use style references.
-                              </div>
-                              <div>
-                                  <strong className="block text-gray-900 dark:text-white mb-1">E-Commerce</strong>
-                                  Remove backgrounds, add price tags, and enhance product textures.
-                              </div>
-                              <div>
-                                  <strong className="block text-gray-900 dark:text-white mb-1">Style Reference</strong>
-                                  Upload an image in the Creative tab to copy its color palette and mood.
-                              </div>
-                          </div>
-                      </section>
-                  </div>
-              </div>
+      {/* Toast Notification */}
+      {toastMessage && (
+          <div className="absolute top-20 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-4 py-2 rounded-full shadow-xl z-[100] text-xs font-bold animate-in slide-in-from-top-4 fade-in flex items-center gap-2">
+              <Check className="w-3 h-3 text-green-400"/> {toastMessage}
+              <button className="ml-2 text-gray-400 hover:text-white" onClick={handleUndo}>UNDO</button>
           </div>
       )}
 
@@ -889,112 +703,52 @@ function App() {
             <h1 className="text-xl font-bold text-gray-900 dark:text-white tracking-tight">Nano<span className="text-yellow-500 font-light">Edit</span></h1>
          </div>
 
-         {/* GLOBAL TOOLS TOOLBAR - Centered */}
+         {/* Center Toolbar */}
          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-4">
-             {/* Core Modes */}
              <div className="flex items-center bg-gray-100 dark:bg-slate-800 rounded-lg p-1 border border-gray-200 dark:border-slate-700 shadow-sm">
-                <button 
-                  onClick={() => { setMode(EditMode.SELECT); setIsCleanupMode(false); }} 
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-md transition ${mode === EditMode.SELECT && !isCleanupMode ? 'bg-blue-100 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400 font-bold' : 'text-gray-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700'}`}
-                  title="Select Area"
-                >
-                    <Scan className="w-4 h-4" /> <span className="text-[10px] font-medium hidden lg:inline">Select</span>
-                </button>
-                <button 
-                  onClick={() => { setMode(EditMode.SELECT); setIsCleanupMode(true); setPrompt("Remove object"); }} 
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-md transition ${isCleanupMode ? 'bg-red-100 text-red-600 dark:bg-red-500/20 dark:text-red-400 font-bold' : 'text-gray-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700'}`}
-                  title="Cleanup / Erase Object"
-                >
-                    <Eraser className="w-4 h-4" /> <span className="text-[10px] font-medium hidden lg:inline">Cleanup</span>
-                </button>
-                <button 
-                  onClick={() => handleAddTextMode()} 
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-md transition ${mode === EditMode.TEXT ? 'bg-indigo-100 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400 font-bold' : 'text-gray-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700'}`}
-                  title="Add Text"
-                >
-                    <TypeIcon className="w-4 h-4" /> <span className="text-[10px] font-medium hidden lg:inline">Text</span>
-                </button>
-                <button 
-                  onClick={handleRemoveWatermark} 
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-md transition text-gray-600 dark:text-slate-300 hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-500 dark:hover:text-red-400"
-                  title="Delete Watermark/Text"
-                >
-                    <WifiOff className="w-4 h-4" />
-                </button>
+                <button onClick={() => { setMode(EditMode.SELECT); setIsCleanupMode(false); }} className={`tool-icon-btn ${mode === EditMode.SELECT && !isCleanupMode ? 'active' : ''}`} title="Select"><Scan className="w-4 h-4"/></button>
+                <button onClick={() => { setMode(EditMode.SELECT); setIsCleanupMode(true); }} className={`tool-icon-btn ${isCleanupMode ? 'active-red' : ''}`} title="Cleanup"><Eraser className="w-4 h-4"/></button>
+                <button onClick={() => handleAddTextMode()} className={`tool-icon-btn ${mode === EditMode.TEXT ? 'active-indigo' : ''}`} title="Text"><TypeIcon className="w-4 h-4"/></button>
              </div>
              
-             <div className="w-px h-6 bg-gray-200 dark:bg-slate-800"></div>
+             {/* Reference Toggle */}
+             <button onClick={() => referenceInputRef.current?.click()} className={`p-2 rounded-lg transition ${mode === EditMode.REFERENCE ? 'bg-blue-500 text-white' : 'text-gray-500 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800'}`} title="Reference Overlay">
+                 <Layers className="w-5 h-5"/>
+             </button>
+             <input type="file" ref={referenceInputRef} onChange={handleReferenceUpload} className="hidden"/>
 
-             {/* Selection Actions */}
-             <div className="flex items-center bg-gray-100 dark:bg-slate-800 rounded-lg p-1 border border-gray-200 dark:border-slate-700 shadow-sm">
-                <button 
-                   disabled={!currentSelection}
-                   onClick={() => handleGenerate("Remove background from selection", false)}
-                   className="flex items-center gap-2 px-3 py-1.5 rounded-md transition text-gray-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed"
-                   title="Remove Background from Selection"
-                >
-                    <Scissors className="w-4 h-4"/> <span className="text-[10px] font-medium hidden lg:inline">Rem BG</span>
-                </button>
-                <button 
-                   disabled={!currentSelection}
-                   onClick={() => handleGenerate("Keep only the selection and remove everything else", true)}
-                   className="flex items-center gap-2 px-3 py-1.5 rounded-md transition text-gray-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed"
-                   title="Extract Object"
-                >
-                    <UserCheck className="w-4 h-4"/> <span className="text-[10px] font-medium hidden lg:inline">Extract</span>
-                </button>
-             </div>
+             <button onClick={() => { setActiveTab(EditTab.REVIEW); setMode(EditMode.INSPECT); }} className={`p-2 rounded-lg transition ${mode === EditMode.INSPECT ? 'bg-cyan-500 text-white' : 'text-gray-500 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800'}`} title="Inspect"><ZoomIn className="w-5 h-5"/></button>
          </div>
 
          <div className="flex items-center gap-4 shrink-0">
-             <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} className="header-icon-btn" title="Toggle Theme">
-                 {theme === 'dark' ? <Sun className="w-5 h-5"/> : <Moon className="w-5 h-5"/>}
-             </button>
-             <button onClick={() => setShowHelp(true)} className="header-icon-btn" title="Help">
-                 <HelpCircle className="w-5 h-5"/>
-             </button>
+             <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} className="header-icon-btn">{theme === 'dark' ? <Sun className="w-5 h-5"/> : <Moon className="w-5 h-5"/>}</button>
              <div className="h-6 w-px bg-gray-200 dark:bg-slate-800"></div>
-             <button onClick={handleUndo} disabled={currentIndex <= 0} className="header-icon-btn" title="Undo"><RotateCcw className="w-5 h-5"/></button>
-             <button onClick={handleRedo} disabled={currentIndex >= history.length - 1} className="header-icon-btn" title="Redo"><RotateCw className="w-5 h-5"/></button>
+             <button onClick={handleUndo} disabled={currentIndex <= 0} className="header-icon-btn"><RotateCcw className="w-5 h-5"/></button>
+             <button onClick={handleRedo} disabled={currentIndex >= history.length - 1} className="header-icon-btn"><RotateCw className="w-5 h-5"/></button>
          </div>
       </header>
 
       {/* Main Layout */}
       <main className="flex-1 flex overflow-hidden">
-          
-          {/* Left Panel: Tools */}
           {renderLeftPanel()}
 
-          {/* Center Panel: Canvas */}
-          <div className="flex-1 relative bg-gray-100 dark:bg-[url('https://www.transparenttextures.com/patterns/dark-matter.png')] dark:bg-slate-950 transition-colors flex flex-col">
-             
-             {/* Empty State */}
+          <div className="flex-1 relative bg-gray-100 dark:bg-slate-950 transition-colors flex flex-col">
              {!currentImage && (
                  <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
-                     <div className="bg-white dark:bg-slate-900/50 backdrop-blur p-8 rounded-2xl border border-gray-200 dark:border-slate-700 shadow-xl text-center pointer-events-auto cursor-pointer transition transform hover:scale-105" onClick={() => fileInputRef.current?.click()}>
-                         <div className="w-16 h-16 bg-blue-100 dark:bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
-                             <Upload className="w-8 h-8 text-blue-500 dark:text-blue-400"/>
-                         </div>
-                         <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-2">Upload Image</h2>
-                         <p className="text-gray-500 dark:text-slate-400 text-sm mb-4">Drag & drop or click to browse</p>
-                         <button className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium">Select File</button>
+                     <div className="bg-white dark:bg-slate-900/50 backdrop-blur p-8 rounded-2xl border border-gray-200 dark:border-slate-700 shadow-xl text-center pointer-events-auto cursor-pointer hover:scale-105 transition" onClick={() => fileInputRef.current?.click()}>
+                         <Upload className="w-8 h-8 text-blue-500 mx-auto mb-4"/>
+                         <h2 className="text-xl font-bold dark:text-white mb-2">Upload Image</h2>
+                         <button className="bg-blue-600 text-white px-6 py-2 rounded-lg font-medium">Select File</button>
                      </div>
                  </div>
              )}
 
              {isProcessing && <LoadingSpinner />}
              
-             <div className="flex-1 relative">
-                 {/* Close Button for Main Image */}
-                 {currentImage && (
-                    <button 
-                        onClick={clearMainImage}
-                        className="absolute top-4 right-4 z-50 p-2 bg-red-500 hover:bg-red-600 text-white rounded-full shadow-lg transition-transform hover:scale-110"
-                        title="Close / Clear Image"
-                    >
-                        <X className="w-5 h-5"/>
-                    </button>
-                 )}
+             <div className="flex-1 relative overflow-hidden">
+                 {currentImage && <button onClick={clearMainImage} className="absolute top-4 right-4 z-50 p-2 bg-red-500 hover:bg-red-600 text-white rounded-full shadow-lg hover:scale-110 transition"><X className="w-5 h-5"/></button>}
+                 
+                 {showReferenceUI && referenceOverlay && renderReferenceUI()}
 
                 <ImageEditor 
                     ref={editorRef}
@@ -1007,76 +761,45 @@ function App() {
                     textOverlay={textOverlay}
                     onTextChange={setTextOverlay}
                     enable3D={is3DMode}
+                    inspectorOverlay={inspectorOverlay}
+                    zoomLevel={zoomLevel}
+                    referenceOverlay={referenceOverlay}
+                    onReferenceChange={setReferenceOverlay}
+                    quickLabels={quickLabels}
                 />
-                
-                {/* Generated Story Overlay */}
-                {generatedStory && (
-                    <div className="absolute bottom-6 left-1/2 -translate-x-1/2 w-full max-w-lg px-6 z-20 animate-in slide-in-from-bottom fade-in duration-500">
-                        <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border border-indigo-500/30 rounded-2xl p-4 shadow-2xl relative overflow-hidden group">
-                             {/* Decorative glow */}
-                             <div className="absolute -top-10 -left-10 w-20 h-20 bg-indigo-500/20 blur-2xl rounded-full"></div>
-                             <div className="absolute -bottom-10 -right-10 w-20 h-20 bg-purple-500/20 blur-2xl rounded-full"></div>
-                             
-                             <button 
-                               onClick={() => setGeneratedStory(null)}
-                               className="absolute top-2 right-2 p-1 text-gray-400 hover:text-red-500 transition"
-                             >
-                                 <X className="w-3 h-3"/>
-                             </button>
-
-                             <h4 className="text-xs font-bold text-indigo-500 uppercase tracking-widest mb-1 flex items-center gap-2">
-                                 <Sparkles className="w-3 h-3"/> AI Story
-                             </h4>
-                             <p className="text-sm font-medium text-gray-800 dark:text-slate-100 italic leading-relaxed">
-                                 &quot;{generatedStory}&quot;
-                             </p>
-                             <div className="mt-3 flex justify-end">
-                                 <button 
-                                   onClick={() => {navigator.clipboard.writeText(generatedStory);}}
-                                   className="text-[10px] flex items-center gap-1 text-gray-500 hover:text-indigo-500 transition"
-                                 >
-                                     <Share2 className="w-3 h-3"/> Copy
-                                 </button>
-                             </div>
-                        </div>
-                    </div>
-                )}
              </div>
 
-             {/* Canvas Floating Controls */}
+             {/* Bottom Floating Controls */}
              {currentImage && (
                  <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-4 bg-white/90 dark:bg-slate-800/90 backdrop-blur px-4 py-2 rounded-full shadow-xl border border-gray-200 dark:border-slate-700 z-10">
-                     <button onClick={() => setCompareToggle(!compareToggle)} className={`icon-toggle ${compareToggle ? 'active' : ''}`} title="Compare">
-                         <LayoutTemplate className="w-5 h-5"/>
-                     </button>
+                     <button onClick={() => setCompareToggle(!compareToggle)} className={`icon-toggle ${compareToggle ? 'active' : ''}`}><LayoutTemplate className="w-5 h-5"/></button>
                      <div className="w-px h-4 bg-gray-300 dark:bg-slate-600"></div>
-                     <button onClick={() => { setIs3DMode(!is3DMode); setMode(EditMode.VIEW); }} className={`icon-toggle ${is3DMode ? 'active' : ''}`} title="3D View">
-                         <Box className="w-5 h-5"/>
-                     </button>
+                     <button onClick={() => { setIs3DMode(!is3DMode); setMode(EditMode.VIEW); }} className={`icon-toggle ${is3DMode ? 'active' : ''}`}><Box className="w-5 h-5"/></button>
                  </div>
              )}
           </div>
-
-          {/* Right Panel: Export */}
-          {currentImage && renderRightPanel()}
       </main>
-
-      {/* Hidden File Inputs */}
-      <input type="file" ref={fileInputRef} onChange={handleUpload} accept="image/*" className="hidden" />
       
+      <input type="file" ref={fileInputRef} onChange={handleUpload} accept="image/*" className="hidden" />
       <style>{`
         .header-icon-btn { @apply p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-slate-800 text-gray-500 dark:text-slate-400 hover:text-gray-900 dark:hover:text-white transition disabled:opacity-30; }
         .panel-title { @apply text-xs font-bold text-gray-500 dark:text-slate-500 uppercase tracking-wider mb-3; }
-        .tool-btn-lg { @apply flex flex-col items-center justify-center p-3 rounded-lg bg-gray-50 dark:bg-slate-800 border border-transparent hover:bg-gray-200 dark:hover:bg-slate-700 text-gray-600 dark:text-slate-300 transition h-20 w-full; }
-        .tool-btn-lg.active { @apply bg-blue-50 dark:bg-blue-500/10 border-blue-200 dark:border-blue-500/50 text-blue-600 dark:text-blue-400; }
-        .tool-btn-lg.active-red { @apply bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/50 text-red-600 dark:text-red-400; }
-        .tool-btn-lg.active-blue { @apply bg-indigo-50 dark:bg-indigo-500/10 border-indigo-200 dark:border-indigo-500/50 text-indigo-600 dark:text-indigo-400; }
         .tool-chip { @apply flex items-center gap-1.5 px-3 py-2 bg-gray-100 dark:bg-slate-800 border border-transparent rounded-lg text-xs font-medium text-gray-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700 hover:border-gray-300 dark:hover:border-slate-600 transition; }
         .tool-row-btn { @apply w-full flex items-center gap-2 p-2 rounded-lg bg-gray-50 dark:bg-slate-800 border border-transparent hover:border-gray-300 dark:hover:border-slate-700 text-xs font-medium text-gray-700 dark:text-slate-300 transition; }
-        .social-btn { @apply flex items-center justify-center gap-2 p-2 bg-gray-100 dark:bg-slate-800 rounded text-xs text-gray-600 dark:text-slate-400 hover:bg-gray-200 dark:hover:bg-slate-700; }
+        .tab-btn { @apply px-4 py-2 rounded-lg text-xs font-bold transition whitespace-nowrap text-gray-500 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800; }
+        .tab-btn.active { @apply bg-blue-500 text-white shadow-blue-500/20; }
+        .tab-btn.active-cyan { @apply bg-cyan-600 text-white shadow-cyan-500/20; }
+        .tool-icon-btn { @apply p-2 rounded-md text-gray-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700 transition; }
+        .tool-icon-btn.active { @apply bg-blue-100 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400 font-bold; }
+        .tool-icon-btn.active-red { @apply bg-red-100 text-red-600 dark:bg-red-500/20 dark:text-red-400 font-bold; }
+        .tool-icon-btn.active-indigo { @apply bg-indigo-100 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400 font-bold; }
         .icon-toggle { @apply p-2 rounded-full text-gray-500 dark:text-slate-400 hover:text-gray-900 dark:hover:text-white transition; }
         .icon-toggle.active { @apply text-blue-500 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20; }
         .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .dark .custom-scrollbar::-webkit-scrollbar-thumb { background: #475569; }
       `}</style>
     </div>
   );
