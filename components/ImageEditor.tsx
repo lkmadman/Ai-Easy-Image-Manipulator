@@ -1,11 +1,13 @@
+
 import React, { useRef, useEffect, useState, useCallback, useImperativeHandle, forwardRef } from 'react';
-import { SelectionBox, EditMode, TextOverlay, InspectorOverlay, ReferenceOverlayState, QuickLabel } from '../types';
+import { SelectionBox, EditMode, TextOverlay, InspectorOverlay, ReferenceSubject, Point } from '../types';
 import { loadImage } from '../utils/imageUtils';
 
 interface ImageEditorProps {
   imageDataUrl: string | null;
   mode: EditMode;
   onSelectionChange: (box: SelectionBox | null) => void;
+  onCanvasClick?: (point: Point) => void;
   isProcessing: boolean;
   enable3D?: boolean;
   showMask?: boolean;
@@ -15,10 +17,14 @@ interface ImageEditorProps {
   inspectorOverlay?: InspectorOverlay;
   zoomLevel?: number | 'fit'; 
   
-  // New props
-  referenceOverlay?: ReferenceOverlayState | null;
-  onReferenceChange?: (ref: ReferenceOverlayState) => void;
-  quickLabels?: QuickLabel[];
+  // Updated prop for multiple subjects
+  referenceSubjects?: ReferenceSubject[];
+  activeReferenceId?: string | null;
+  onReferenceTransform?: (id: string, updates: Partial<ReferenceSubject>) => void;
+  onReferenceSelect?: (id: string | null) => void;
+  
+  // New prop for cleanup
+  onStrokeEnd?: () => void;
 }
 
 export interface ImageEditorHandle {
@@ -32,6 +38,7 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
   imageDataUrl, 
   mode, 
   onSelectionChange,
+  onCanvasClick,
   isProcessing,
   enable3D = false,
   showMask = false,
@@ -40,24 +47,31 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
   onTextChange,
   inspectorOverlay = 'none',
   zoomLevel = 'fit',
-  referenceOverlay,
-  onReferenceChange,
-  quickLabels = []
+  referenceSubjects = [],
+  activeReferenceId,
+  onReferenceTransform,
+  onReferenceSelect,
+  onStrokeEnd
 }, ref) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
+  // Use a ref to hold the offscreen canvas for the mask
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const exposureCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const [imageObj, setImageObj] = useState<HTMLImageElement | null>(null);
   const [compareImageObj, setCompareImageObj] = useState<HTMLImageElement | null>(null);
-  const [referenceImgObj, setReferenceImgObj] = useState<HTMLImageElement | null>(null);
+  
+  // Cache for reference images: { [id]: HTMLImageElement }
+  const [refImages, setRefImages] = useState<Record<string, HTMLImageElement>>({});
   
   const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
   
   const [isDragging, setIsDragging] = useState(false);
   const [startPos, setStartPos] = useState({ x: 0, y: 0 });
+  const [clickStartTime, setClickStartTime] = useState(0);
+  const [hasDrawn, setHasDrawn] = useState(false);
   
   const [baseMetrics, setBaseMetrics] = useState({ scale: 1, ox: 0, oy: 0 });
   const [transform, setTransform] = useState({ scale: 1, x: 0, y: 0 });
@@ -66,14 +80,24 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
   const [sliderPos, setSliderPos] = useState(0.5); 
   const [isDraggingSlider, setIsDraggingSlider] = useState(false);
 
-  // Load Reference Image Object
+  // Load Reference Image Objects
   useEffect(() => {
-    if (referenceOverlay?.url) {
-      loadImage(referenceOverlay.url).then(setReferenceImgObj).catch(() => setReferenceImgObj(null));
-    } else {
-      setReferenceImgObj(null);
-    }
-  }, [referenceOverlay?.url]);
+    const loadRefs = async () => {
+        const newRefs: Record<string, HTMLImageElement> = {};
+        for (const subj of referenceSubjects) {
+            if (!refImages[subj.id] && subj.visible) {
+                try {
+                    const img = await loadImage(subj.url);
+                    newRefs[subj.id] = img;
+                } catch (e) { console.error("Failed to load ref image", subj.id); }
+            } else if (refImages[subj.id]) {
+                newRefs[subj.id] = refImages[subj.id];
+            }
+        }
+        setRefImages(newRefs);
+    };
+    loadRefs();
+  }, [referenceSubjects]);
 
   useImperativeHandle(ref, () => ({
     getMaskDataUrl: () => {
@@ -81,18 +105,21 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = imageObj.width;
       tempCanvas.height = imageObj.height;
-      const ctx = tempCanvas.getContext('2d');
+      const ctx = tempCanvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) return null;
 
-      ctx.fillStyle = 'black';
-      ctx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
-
-      ctx.globalCompositeOperation = 'source-over';
+      // 1. Draw the mask (transparent bg, white strokes)
       ctx.drawImage(maskCanvasRef.current, 0, 0);
       
+      // 2. Ensure mask is pure white where drawn
       ctx.globalCompositeOperation = 'source-in';
       ctx.fillStyle = 'white';
-      ctx.fillRect(0,0, tempCanvas.width, tempCanvas.height);
+      ctx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+      
+      // 3. Fill background with black behind the mask
+      ctx.globalCompositeOperation = 'destination-over';
+      ctx.fillStyle = 'black';
+      ctx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
       
       return tempCanvas.toDataURL('image/png');
     },
@@ -105,16 +132,6 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
         if (!ctx) return null;
 
         ctx.drawImage(imageObj, 0, 0);
-        
-        if (textOverlay) {
-             ctx.font = `${textOverlay.fontWeight || 'normal'} ${textOverlay.fontSize}px ${textOverlay.fontFamily}`;
-             ctx.fillStyle = textOverlay.color;
-             if (textOverlay.shadowBlur && textOverlay.shadowBlur > 0) {
-                 ctx.shadowColor = textOverlay.shadowColor || 'black';
-                 ctx.shadowBlur = textOverlay.shadowBlur;
-             }
-             ctx.fillText(textOverlay.text, textOverlay.x, textOverlay.y);
-        }
         return tempCanvas.toDataURL('image/png');
     },
     resetZoom: () => setTransform({ scale: 1, x: 0, y: 0 }),
@@ -123,7 +140,7 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
 
   // Handle Zoom Prop
   useEffect(() => {
-    if ((mode === EditMode.INSPECT || mode === EditMode.REFERENCE) && typeof zoomLevel === 'number' && imageObj) {
+    if ((mode === EditMode.INSPECT) && typeof zoomLevel === 'number' && imageObj) {
          if (baseMetrics.scale > 0) {
              setTransform({ scale: zoomLevel / baseMetrics.scale, x: 0, y: 0 });
          }
@@ -151,13 +168,9 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
               const b = data[i+2];
               const luma = 0.299 * r + 0.587 * g + 0.114 * b;
               
-              if (luma > 245) { // Highlight Clipping
-                  data[i] = 255; data[i+1] = 0; data[i+2] = 0; data[i+3] = 255;
-              } else if (luma < 10) { // Shadow Crushing
-                  data[i] = 0; data[i+1] = 0; data[i+2] = 255; data[i+3] = 255;
-              } else {
-                  data[i+3] = 0; // Transparent
-              }
+              if (luma > 245) { data[i] = 255; data[i+1] = 0; data[i+2] = 0; data[i+3] = 255; } 
+              else if (luma < 10) { data[i] = 0; data[i+1] = 0; data[i+2] = 255; data[i+3] = 255; } 
+              else { data[i+3] = 0; }
           }
           ctx.putImageData(imageData, 0, 0);
           exposureCanvasRef.current = c;
@@ -170,20 +183,17 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
     if (imageDataUrl) {
       loadImage(imageDataUrl).then((img) => {
         setImageObj(img);
+        const mc = document.createElement('canvas');
+        mc.width = img.width;
+        mc.height = img.height;
+        maskCanvasRef.current = mc;
         setSelectionBox(null);
         onSelectionChange(null);
         exposureCanvasRef.current = null; 
-        if (maskCanvasRef.current) {
-            const ctx = maskCanvasRef.current.getContext('2d');
-            ctx?.clearRect(0, 0, img.width, img.height);
-        }
       });
     } else {
         setImageObj(null);
-        if (canvasRef.current) {
-            const ctx = canvasRef.current.getContext('2d');
-            ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-        }
+        maskCanvasRef.current = null;
     }
   }, [imageDataUrl, onSelectionChange]);
 
@@ -216,7 +226,7 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
     const scaleY = maxHeight / imageObj.height;
     const baseScale = Math.min(scaleX, scaleY, 0.9);
     
-    // Stabilization: only update baseMetrics if strictly necessary to avoid jitter
+    // Stabilization
     if (Math.abs(baseScale - baseMetrics.scale) > 0.001 || baseMetrics.scale === 1) {
         setBaseMetrics({ scale: baseScale, ox: (maxWidth - imageObj.width * baseScale) / 2, oy: (maxHeight - imageObj.height * baseScale) / 2 });
     }
@@ -234,83 +244,40 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
     
     ctx.imageSmoothingEnabled = currentScale < 4; 
 
-    // Draw Helpers
-    const drawText = () => {
-        if (textOverlay) {
-             const tx = ox + textOverlay.x * currentScale;
-             const ty = oy + textOverlay.y * currentScale;
-             ctx.font = `${textOverlay.fontWeight || 'normal'} ${textOverlay.fontSize * currentScale}px ${textOverlay.fontFamily}`;
-             ctx.fillStyle = textOverlay.color;
-             if (textOverlay.shadowBlur && textOverlay.shadowBlur > 0) {
-                 ctx.shadowColor = textOverlay.shadowColor || 'black';
-                 ctx.shadowBlur = textOverlay.shadowBlur * currentScale;
-             } else {
-                 ctx.shadowColor = 'transparent';
-                 ctx.shadowBlur = 0;
-             }
-             ctx.fillText(textOverlay.text, tx, ty);
-             ctx.shadowColor = 'transparent';
-             ctx.shadowBlur = 0;
-             
-             if (mode === EditMode.TEXT) {
-                 const metrics = ctx.measureText(textOverlay.text);
-                 const h = textOverlay.fontSize * currentScale;
-                 ctx.strokeStyle = '#facc15';
-                 ctx.setLineDash([4, 2]);
-                 ctx.strokeRect(tx - 5, ty - h, metrics.width + 10, h + 10);
-                 ctx.setLineDash([]);
-             }
-        }
-    };
-
-    const drawQuickLabels = () => {
-        if (quickLabels.length > 0) {
-            ctx.font = `bold ${12 * Math.max(1, Math.min(2, currentScale))}px sans-serif`;
-            quickLabels.forEach(lbl => {
-                const lx = ox + lbl.x * currentScale;
-                const ly = oy + lbl.y * currentScale;
-                
-                const padding = 4;
-                const metrics = ctx.measureText(lbl.text);
-                const h = 12 * Math.max(1, Math.min(2, currentScale));
-                
-                ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
-                ctx.fillRect(lx, ly - h, metrics.width + padding * 2, h + padding);
-                
-                ctx.fillStyle = "white";
-                ctx.fillText(lbl.text, lx + padding, ly);
-                
-                // Pin
-                ctx.beginPath();
-                ctx.arc(lx, ly, 3, 0, Math.PI * 2);
-                ctx.fillStyle = "#facc15";
-                ctx.fill();
-            });
-        }
-    };
-
-    const drawReference = () => {
-        if (referenceImgObj && referenceOverlay) {
-            ctx.globalAlpha = referenceOverlay.opacity;
-            // refX/Y are relative to image coordinates (0-imageWidth)
-            const rx = ox + referenceOverlay.x * currentScale;
-            const ry = oy + referenceOverlay.y * currentScale;
-            const rw = referenceImgObj.width * referenceOverlay.scale * currentScale;
-            const rh = referenceImgObj.height * referenceOverlay.scale * currentScale;
+    // Helper: Draw single reference subject
+    const drawReferenceSubject = (subj: ReferenceSubject) => {
+        const img = refImages[subj.id];
+        if (img && subj.visible) {
+            ctx.save();
+            ctx.globalAlpha = subj.opacity;
             
-            ctx.drawImage(referenceImgObj, rx, ry, rw, rh);
+            const rx = ox + subj.x * currentScale;
+            const ry = oy + subj.y * currentScale;
+            const rw = img.width * subj.scale * currentScale;
+            const rh = img.height * subj.scale * currentScale;
             
-            // Selection box for reference
-            if (mode === EditMode.REFERENCE) {
+            // Transform (Center origin)
+            const rcx = rx + rw / 2;
+            const rcy = ry + rh / 2;
+            
+            ctx.translate(rcx, rcy);
+            ctx.rotate((subj.rotation || 0) * Math.PI / 180);
+            ctx.drawImage(img, -rw / 2, -rh / 2, rw, rh);
+            
+            // Selection box if active
+            if (activeReferenceId === subj.id && mode !== EditMode.REFERENCE_EDIT) {
                 ctx.strokeStyle = '#3b82f6';
-                ctx.lineWidth = 1;
+                ctx.lineWidth = 2;
                 ctx.setLineDash([5, 5]);
-                ctx.strokeRect(rx, ry, rw, rh);
+                ctx.strokeRect(-rw / 2, -rh / 2, rw, rh);
                 ctx.setLineDash([]);
-                // Resize handle hint
+                
+                // Drag handle
                 ctx.fillStyle = '#3b82f6';
-                ctx.fillRect(rx + rw - 5, ry + rh - 5, 10, 10);
+                ctx.fillRect(rw / 2 - 6, rh / 2 - 6, 12, 12);
             }
+            
+            ctx.restore();
             ctx.globalAlpha = 1.0;
         }
     };
@@ -327,11 +294,6 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
             ctx.moveTo(ox, oy + h3); ctx.lineTo(ox + drawW, oy + h3);
             ctx.moveTo(ox, oy + h3 * 2); ctx.lineTo(ox + drawW, oy + h3 * 2);
             ctx.stroke();
-            ctx.strokeStyle = 'rgba(255, 0, 0, 0.3)';
-            ctx.beginPath();
-            ctx.moveTo(ox + drawW/2, oy); ctx.lineTo(ox + drawW/2, oy + drawH);
-            ctx.moveTo(ox, oy + drawH/2); ctx.lineTo(ox + drawW, oy + drawH/2);
-            ctx.stroke();
         }
         if (inspectorOverlay === 'exposure' && exposureCanvasRef.current) {
             ctx.globalAlpha = 0.6;
@@ -340,73 +302,8 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
         }
     };
 
-    // Drawing Logic
-    if (compareImageObj && !enable3D) {
-        // Slider Compare
-        ctx.drawImage(compareImageObj, ox, oy, drawW, drawH);
-        ctx.fillStyle = "rgba(0,0,0,0.5)";
-        ctx.fillRect(ox + 10, oy + 10, 80, 24);
-        ctx.fillStyle = "white";
-        ctx.font = "12px sans-serif";
-        ctx.fillText("Before", ox + 20, oy + 26);
-
-        ctx.save();
-        const splitX = ox + drawW * sliderPos;
-        ctx.beginPath();
-        ctx.rect(ox, oy, splitX - ox, drawH);
-        ctx.clip();
-        
-        ctx.drawImage(imageObj, ox, oy, drawW, drawH);
-        drawText();
-        drawOverlays();
-        drawReference();
-        drawQuickLabels();
-        
-        if (maskCanvasRef.current && showMask) {
-            ctx.globalAlpha = 0.5;
-            ctx.drawImage(maskCanvasRef.current, 0, 0, imageObj.width, imageObj.height, ox, oy, drawW, drawH);
-            ctx.globalAlpha = 1.0;
-        }
-        ctx.fillStyle = "rgba(0,0,0,0.5)";
-        ctx.fillRect(ox + 10, oy + drawH - 34, 80, 24);
-        ctx.fillStyle = "white";
-        ctx.font = "12px sans-serif";
-        ctx.fillText("After", ox + 20, oy + drawH - 18);
-        ctx.restore();
-
-        // Slider Handle
-        ctx.beginPath();
-        ctx.moveTo(splitX, oy);
-        ctx.lineTo(splitX, oy + drawH);
-        ctx.strokeStyle = "white";
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(splitX, oy + drawH / 2, 15, 0, Math.PI * 2);
-        ctx.fillStyle = "white";
-        ctx.fill();
-        ctx.strokeStyle = "rgba(0,0,0,0.2)";
-        ctx.stroke();
-        ctx.fillStyle = "#333";
-        ctx.beginPath();
-        ctx.moveTo(splitX - 4, oy + drawH / 2);
-        ctx.lineTo(splitX - 8, oy + drawH / 2 - 4);
-        ctx.lineTo(splitX - 8, oy + drawH / 2 + 4);
-        ctx.fill();
-        ctx.beginPath();
-        ctx.moveTo(splitX + 4, oy + drawH / 2);
-        ctx.lineTo(splitX + 8, oy + drawH / 2 - 4);
-        ctx.lineTo(splitX + 8, oy + drawH / 2 + 4);
-        ctx.fill();
-    } else {
-        // Standard View
-        ctx.drawImage(imageObj, ox, oy, drawW, drawH);
-        drawText();
-        drawReference();
-        drawOverlays();
-        drawQuickLabels();
-
-        if (maskCanvasRef.current) {
+    const drawMaskAndSelection = () => {
+         if (maskCanvasRef.current) {
             ctx.save();
             if (showMask) {
                 const tempC = document.createElement('canvas');
@@ -420,9 +317,12 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
                     tCtx.fillRect(0,0, tempC.width, tempC.height);
                 }
                 ctx.drawImage(tempC, ox, oy, drawW, drawH);
-            } else {
-                ctx.globalAlpha = 0.3;
+            } else if (mode === EditMode.ERASE || mode === EditMode.SELECT) {
+                // Show mask overlay
+                ctx.save();
+                ctx.globalAlpha = 0.5;
                 ctx.drawImage(maskCanvasRef.current, 0, 0, imageObj.width, imageObj.height, ox, oy, drawW, drawH);
+                ctx.restore();
             }
             ctx.restore();
         }
@@ -437,21 +337,59 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
             ctx.setLineDash([4, 2]);
             ctx.strokeRect(sx, sy, sw, sh);
             ctx.setLineDash([]);
+            ctx.fillStyle = 'rgba(250, 204, 21, 0.1)';
+            ctx.fillRect(sx, sy, sw, sh);
         }
-    }
-  }, [imageObj, compareImageObj, selectionBox, transform, baseMetrics, showMask, sliderPos, textOverlay, mode, enable3D, inspectorOverlay, referenceOverlay, referenceImgObj, quickLabels]);
+    };
 
-  // Stable Resize Observer
+    // Draw Loop
+    ctx.drawImage(imageObj, ox, oy, drawW, drawH);
+    
+    if (compareImageObj && !enable3D && mode !== EditMode.REFERENCE_EDIT) {
+        // Slider Compare
+        ctx.save();
+        const splitX = ox + drawW * sliderPos;
+        ctx.beginPath(); ctx.rect(splitX, oy, drawW - (splitX - ox), drawH); ctx.clip();
+        ctx.drawImage(compareImageObj, ox, oy, drawW, drawH);
+        ctx.restore();
+        
+        ctx.beginPath(); ctx.moveTo(splitX, oy); ctx.lineTo(splitX, oy + drawH);
+        ctx.strokeStyle = "white"; ctx.lineWidth = 2; ctx.stroke();
+    }
+
+    // Draw Reference Subjects (Sorted by Z)
+    if (mode !== EditMode.REFERENCE_EDIT) {
+        const sortedRefs = [...referenceSubjects].sort((a,b) => a.zOrder - b.zOrder);
+        sortedRefs.forEach(drawReferenceSubject);
+    }
+
+    drawOverlays();
+    drawMaskAndSelection();
+    
+    // Text Overlay
+    if (textOverlay) {
+         const tx = ox + textOverlay.x * currentScale;
+         const ty = oy + textOverlay.y * currentScale;
+         ctx.font = `${textOverlay.fontWeight || 'normal'} ${textOverlay.fontSize * currentScale}px ${textOverlay.fontFamily}`;
+         ctx.fillStyle = textOverlay.color;
+         if (textOverlay.shadowBlur) {
+             ctx.shadowColor = textOverlay.shadowColor || 'black';
+             ctx.shadowBlur = textOverlay.shadowBlur * currentScale;
+         }
+         ctx.fillText(textOverlay.text, tx, ty);
+    }
+
+  }, [imageObj, compareImageObj, selectionBox, transform, baseMetrics, showMask, sliderPos, textOverlay, mode, enable3D, inspectorOverlay, referenceSubjects, refImages, activeReferenceId]);
+
+  // Resize Observer
   useEffect(() => {
     if (!containerRef.current) return;
-    const observer = new ResizeObserver(() => {
-        window.requestAnimationFrame(draw);
-    });
+    const observer = new ResizeObserver(() => window.requestAnimationFrame(draw));
     observer.observe(containerRef.current);
     return () => observer.disconnect();
   }, [draw]);
 
-  const getImageCoords = (e: React.MouseEvent) => {
+  const getImageCoords = (e: React.PointerEvent) => {
     const canvas = canvasRef.current;
     if (!canvas || !imageObj) return { x: 0, y: 0, rawX: 0, rawY: 0 };
     const rect = canvas.getBoundingClientRect();
@@ -477,61 +415,43 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
     };
   };
 
-  const handleContainerMouseMove = (e: React.MouseEvent) => {
-    if (!containerRef.current || !enable3D) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+  const handlePointerDown = (e: React.PointerEvent) => {
+    // Capture pointer to track drawing outside element
+    e.currentTarget.setPointerCapture(e.pointerId);
     
-    // Tilt effect calculation
-    const rotateX = ((y / rect.height) - 0.5) * -20; 
-    const rotateY = ((x / rect.width) - 0.5) * 20;
-
-    setTilt({ x: rotateX, y: rotateY });
-  };
-
-  const handleContainerMouseLeave = () => {
-    if (enable3D) {
-       setTilt({ x: 0, y: 0 });
-    }
-  };
-
-  const handleWheel = (e: React.WheelEvent) => {
-      // Allow wheel zoom in INSPECT and REFERENCE mode
-      if ((mode === EditMode.INSPECT || mode === EditMode.REFERENCE) && canvasRef.current && imageObj) {
-          e.preventDefault();
-          const rect = canvasRef.current.getBoundingClientRect();
-          const mouseX = e.clientX - rect.left;
-          const mouseY = e.clientY - rect.top;
-          const maxWidth = containerRef.current?.clientWidth || 0;
-          const maxHeight = containerRef.current?.clientHeight || 0;
-          const centerX = maxWidth / 2;
-          const centerY = maxHeight / 2;
-          const currentPanX = transform.x;
-          const currentPanY = transform.y;
-          const relX = mouseX - centerX - currentPanX;
-          const relY = mouseY - centerY - currentPanY;
-
-          const delta = e.deltaY > 0 ? 0.9 : 1.1;
-          const newScale = Math.max(0.1, Math.min(10, transform.scale * delta));
-          const scaleChange = newScale / transform.scale;
-          const newPanX = currentPanX + relX * (1 - scaleChange);
-          const newPanY = currentPanY + relY * (1 - scaleChange);
-
-          setTransform({ scale: newScale, x: newPanX, y: newPanY });
-      }
-  };
-
-  const handleMouseDown = (e: React.MouseEvent) => {
+    setClickStartTime(Date.now());
     if (enable3D) return;
     const pos = getImageCoords(e);
 
-    // Reference Mode Dragging
-    if (mode === EditMode.REFERENCE && referenceOverlay && onReferenceChange) {
-        setIsDragging(true);
-        setStartPos({ x: pos.x, y: pos.y }); // Store image coords
-        onReferenceChange({ ...referenceOverlay, isDragging: true });
-        return;
+    // Reference Subject Selection & Dragging
+    if (mode !== EditMode.REFERENCE_EDIT && mode !== EditMode.MAGIC_WAND && mode !== EditMode.CAPTION && mode !== EditMode.ERASE) {
+        // Reverse iterate to find top-most selected subject
+        const sortedRefs = [...referenceSubjects].sort((a,b) => b.zOrder - a.zOrder);
+        let clickedSubj = null;
+
+        for (const subj of sortedRefs) {
+            const img = refImages[subj.id];
+            if (!img || !subj.visible) continue;
+            
+            const w = img.width * subj.scale;
+            const h = img.height * subj.scale;
+            if (pos.x >= subj.x && pos.x <= subj.x + w && pos.y >= subj.y && pos.y <= subj.y + h) {
+                clickedSubj = subj;
+                break;
+            }
+        }
+
+        if (clickedSubj) {
+            if (onReferenceSelect) onReferenceSelect(clickedSubj.id);
+            if (onReferenceTransform) {
+                setIsDragging(true);
+                setStartPos({ x: pos.x, y: pos.y });
+                onReferenceTransform(clickedSubj.id, { isDragging: true });
+                return; 
+            }
+        } else if (onReferenceSelect) {
+            onReferenceSelect(null);
+        }
     }
 
     if (mode === EditMode.INSPECT) {
@@ -540,21 +460,8 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
         return;
     }
 
-    if (compareImageObj) {
-         const canvas = canvasRef.current;
-         if (!canvas || !imageObj) return;
-         const rect = canvas.getBoundingClientRect();
-         const clickX = e.clientX - rect.left;
-         const maxWidth = containerRef.current?.clientWidth || 0;
-         const currentScale = baseMetrics.scale * transform.scale;
-         const cx = maxWidth / 2 + transform.x;
-         const drawW = imageObj.width * currentScale;
-         const ox = cx - drawW / 2;
-         const splitX = ox + drawW * sliderPos;
-         
-         if (Math.abs(clickX - splitX) < 40) {
-             setIsDraggingSlider(true);
-         }
+    if (mode === EditMode.MAGIC_WAND || mode === EditMode.REFERENCE_EDIT || mode === EditMode.CAPTION) {
+         setStartPos({ x: pos.x, y: pos.y });
          return;
     }
 
@@ -564,43 +471,65 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
         setIsDragging(true);
         return;
     }
+
     if (mode === EditMode.VIEW) return;
 
     setIsDragging(true);
     setStartPos({ x: pos.x, y: pos.y });
+    setHasDrawn(false);
 
+    // Mask interactions
     const mCtx = maskCanvasRef.current?.getContext('2d');
-    if (!mCtx) return;
-
-    if (mode === EditMode.SELECT) {
+    if (mode === EditMode.SELECT && mCtx) {
         mCtx.clearRect(0, 0, imageObj.width, imageObj.height);
         setSelectionBox(null); 
-    } else if (mode === EditMode.ERASE) {
-        mCtx.globalCompositeOperation = 'destination-out';
+    } else if (mode === EditMode.ERASE && mCtx) {
+        // Start brush stroke
+        mCtx.globalCompositeOperation = 'source-over';
+        mCtx.fillStyle = 'white';
+        mCtx.strokeStyle = 'white';
+        // Refined brush kernel: soft edge with shadow
+        mCtx.shadowColor = 'white';
+        mCtx.shadowBlur = 4;
+        mCtx.lineCap = 'round';
+        mCtx.lineJoin = 'round';
+        
+        const r = 30 / (baseMetrics.scale * transform.scale);
+        mCtx.lineWidth = r;
+        
         mCtx.beginPath();
-        const r = 10 / (baseMetrics.scale * transform.scale);
-        mCtx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
+        mCtx.arc(pos.x, pos.y, r/2, 0, Math.PI * 2);
         mCtx.fill();
+        mCtx.beginPath();
+        mCtx.moveTo(pos.x, pos.y);
+        
+        setHasDrawn(true);
+        draw();
     }
-    draw();
   };
 
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (enable3D) { handleContainerMouseMove(e); return; }
+  const handlePointerMove = (e: React.PointerEvent) => {
+    // 3D Tilt
+    if (enable3D && containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        setTilt({ x: ((y / rect.height) - 0.5) * -20, y: ((x / rect.width) - 0.5) * 20 });
+        return;
+    }
 
     const pos = getImageCoords(e);
 
     // Reference Dragging
-    if (mode === EditMode.REFERENCE && isDragging && referenceOverlay && onReferenceChange) {
-        const dx = pos.x - startPos.x;
-        const dy = pos.y - startPos.y;
-        onReferenceChange({
-            ...referenceOverlay,
-            x: referenceOverlay.x + dx,
-            y: referenceOverlay.y + dy
-        });
-        setStartPos({ x: pos.x, y: pos.y }); // Update for delta
-        return;
+    if (isDragging && activeReferenceId && onReferenceTransform) {
+        const activeSubj = referenceSubjects.find(r => r.id === activeReferenceId);
+        if (activeSubj) {
+            const dx = pos.x - startPos.x;
+            const dy = pos.y - startPos.y;
+            onReferenceTransform(activeReferenceId, { x: activeSubj.x + dx, y: activeSubj.y + dy });
+            setStartPos({ x: pos.x, y: pos.y });
+            return;
+        }
     }
 
     if (mode === EditMode.INSPECT && isDragging) {
@@ -608,19 +537,6 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
         const dy = e.clientY - startPos.y;
         setTransform(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
         setStartPos({ x: e.clientX, y: e.clientY });
-        return;
-    }
-
-    if (isDraggingSlider && imageObj) {
-        const maxWidth = containerRef.current?.clientWidth || 0;
-        const currentScale = baseMetrics.scale * transform.scale;
-        const cx = maxWidth / 2 + transform.x;
-        const drawW = imageObj.width * currentScale;
-        const ox = cx - drawW / 2;
-        const relativeX = pos.rawX - ox;
-        const newPos = Math.max(0, Math.min(1, relativeX / drawW));
-        setSliderPos(newPos);
-        draw();
         return;
     }
 
@@ -643,38 +559,43 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
         const cy = Math.max(0, y);
         const cw = Math.min(imageObj.width - cx, w);
         const ch = Math.min(imageObj.height - cy, h);
-
         setSelectionBox({ x: cx, y: cy, width: cw, height: ch });
-        
-        mCtx.globalCompositeOperation = 'source-over';
         mCtx.clearRect(0, 0, imageObj.width, imageObj.height);
-        mCtx.fillStyle = '#facc15';
+        mCtx.fillStyle = 'white';
         mCtx.fillRect(cx, cy, cw, ch);
-
     } else if (mode === EditMode.ERASE) {
-        mCtx.globalCompositeOperation = 'destination-out';
-        const r = 20 / (baseMetrics.scale * transform.scale);
+        const r = 30 / (baseMetrics.scale * transform.scale);
         mCtx.lineWidth = r;
-        mCtx.lineCap = 'round';
-        mCtx.lineJoin = 'round';
-        mCtx.beginPath();
-        mCtx.moveTo(startPos.x, startPos.y);
         mCtx.lineTo(pos.x, pos.y);
         mCtx.stroke();
-        setStartPos(pos);
+        setHasDrawn(true);
     }
     draw();
   };
 
-  const handleMouseUp = () => {
+  const handlePointerUp = (e: React.PointerEvent) => {
+    e.currentTarget.releasePointerCapture(e.pointerId);
     setIsDraggingSlider(false);
+    const clickDuration = Date.now() - clickStartTime;
+    
+    // Magic Wand / Reference Edit / Caption Click
+    if ((mode === EditMode.MAGIC_WAND || mode === EditMode.REFERENCE_EDIT || mode === EditMode.CAPTION) && clickDuration < 300 && onCanvasClick) {
+        const pos = getImageCoords(e);
+        if (imageObj && pos.x >= 0 && pos.x <= imageObj.width && pos.y >= 0 && pos.y <= imageObj.height) {
+            onCanvasClick({ x: pos.x, y: pos.y });
+        }
+    }
+
     if (isDragging) {
       setIsDragging(false);
-      if (mode === EditMode.REFERENCE && referenceOverlay && onReferenceChange) {
-           onReferenceChange({ ...referenceOverlay, isDragging: false });
+      if (activeReferenceId && onReferenceTransform) {
+           onReferenceTransform(activeReferenceId, { isDragging: false });
       }
       if (mode === EditMode.SELECT && selectionBox) {
         onSelectionChange(selectionBox);
+      }
+      if (mode === EditMode.ERASE && hasDrawn && onStrokeEnd) {
+        onStrokeEnd();
       }
     }
   };
@@ -682,10 +603,10 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
   return (
     <div 
       ref={containerRef} 
-      className={`flex-1 w-full h-full flex items-center justify-center overflow-hidden relative select-none bg-transparent ${mode === EditMode.INSPECT || mode === EditMode.REFERENCE ? 'cursor-move' : ''}`}
-      onMouseMove={enable3D ? handleContainerMouseMove : undefined}
-      onMouseLeave={handleContainerMouseLeave}
-      onWheel={handleWheel}
+      className={`flex-1 w-full h-full flex items-center justify-center overflow-hidden relative select-none bg-transparent ${mode === EditMode.INSPECT ? 'cursor-move' : ''}`}
+      onPointerMove={handlePointerMove}
+      onPointerLeave={() => setTilt({x:0, y:0})}
+      onPointerUp={handlePointerUp}
     >
       {!imageDataUrl && (
         <div className="text-slate-500 dark:text-slate-400 text-center p-8 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-lg animate-in fade-in zoom-in duration-500">
@@ -696,23 +617,14 @@ export const ImageEditor = forwardRef<ImageEditorHandle, ImageEditorProps>(({
       
       <canvas
         ref={canvasRef}
-        className={`shadow-2xl dark:shadow-black transition-transform duration-100 ease-out ${mode === EditMode.SELECT && !enable3D ? 'cursor-crosshair' : mode === EditMode.ERASE && !enable3D ? 'cursor-cell' : isDraggingSlider ? 'cursor-col-resize' : ''}`}
+        className={`shadow-2xl dark:shadow-black transition-transform duration-100 ease-out ${mode === EditMode.SELECT || mode === EditMode.ERASE ? 'cursor-crosshair' : (mode === EditMode.MAGIC_WAND || mode === EditMode.REFERENCE_EDIT || mode === EditMode.CAPTION) ? 'cursor-help' : ''}`}
         style={{
             transform: enable3D ? `rotateX(${tilt.x}deg) rotateY(${tilt.y}deg)` : 'none',
-            transformStyle: 'preserve-3d'
+            transformStyle: 'preserve-3d',
+            touchAction: 'none' 
         }}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+        onPointerDown={handlePointerDown}
       />
-      
-      {/* 3D Hint */}
-      {enable3D && imageDataUrl && (
-          <div className="absolute top-4 bg-blue-500/80 text-white px-3 py-1 rounded-full text-sm backdrop-blur pointer-events-none border border-blue-400 font-medium animate-bounce">
-            Move mouse to rotate 3D view
-         </div>
-      )}
     </div>
   );
 });

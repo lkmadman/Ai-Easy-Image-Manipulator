@@ -6,6 +6,11 @@ export interface SelectionBox {
   height: number;
 }
 
+export interface Point {
+  x: number;
+  y: number;
+}
+
 export interface HistoryItem {
   dataUrl: string; // Base64 image
   timestamp: number;
@@ -15,11 +20,15 @@ export interface HistoryItem {
 export enum EditMode {
   VIEW = 'VIEW',
   SELECT = 'SELECT', // Default box selection
+  MAGIC_WAND = 'MAGIC_WAND', // Point selection
+  CAPTION = 'CAPTION', // Click to Caption
   ERASE = 'ERASE',   // Refine mask
   TEXT = 'TEXT',     // Add Text mode
   INSPECT = 'INSPECT', // Image Inspection (Zoom/Pan)
-  REFERENCE = 'REFERENCE' // Reference positioning mode
+  REFERENCE_EDIT = 'REFERENCE_EDIT' // Editing the reference image itself
 }
+
+export type CaptionTone = 'funny' | 'angry';
 
 export enum EditTab {
   CORE = 'CORE',
@@ -41,7 +50,15 @@ export interface PromptSuggestion {
   icon?: any;
 }
 
-export type ExportFormat = 'png' | 'jpeg' | 'webp' | 'mp4';
+export type ExportFormat = 'png' | 'jpeg' | 'webp';
+
+export interface ExportConfig {
+  format: ExportFormat;
+  quality: number;
+  scale: number; // 1, 2, 4
+  upscale: boolean;
+  filename: string;
+}
 
 export type ImageCategory = 'Human' | 'Vehicle' | 'Product' | 'Animal' | 'Landscape' | 'Other';
 
@@ -67,20 +84,18 @@ export interface TextOverlay {
   isDragging?: boolean;
 }
 
-export interface ReferenceOverlayState {
-  url: string;
+export interface ReferenceSubject {
+  id: string;
+  url: string; // The cutout image
+  label: string; // e.g., "Saree", "Car"
   opacity: number;
-  x: number; // 0-1 relative to canvas width (screen space for overlay) or image space? Let's use image space relative
+  x: number; 
   y: number;
   scale: number;
+  rotation: number;
+  visible: boolean;
+  zOrder: number;
   isDragging?: boolean;
-}
-
-export interface QuickLabel {
-  id: string;
-  text: string;
-  x: number; // Image coordinates
-  y: number;
 }
 
 export interface AppError {
@@ -98,3 +113,19 @@ export interface BatchItem {
 }
 
 export type AppTheme = 'dark' | 'light';
+
+// New types for Structured Prompt Builder
+export type PromptTask = 'Inspect' | 'Overlay' | 'Retouch' | 'Scene' | 'Export';
+
+export interface PromptBuilderState {
+  task: PromptTask;
+  subject: string;
+  intent: string;
+  modifiers: string[]; // List of selected style/material modifiers
+  controls: Record<string, any>;
+  sectionsOpen: {
+      overlay: boolean;
+      scene: boolean;
+      inspection: boolean;
+  };
+}

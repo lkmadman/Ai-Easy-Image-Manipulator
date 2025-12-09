@@ -1,7 +1,7 @@
 
 import { GoogleGenAI } from "@google/genai";
 import { cleanBase64, invertMask, resizeImage } from "../utils/imageUtils";
-import { GlobalAnalysisResult } from "../types";
+import { GlobalAnalysisResult, CaptionTone } from "../types";
 
 // Initialize Gemini API
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -144,6 +144,41 @@ export const editImageWithGemini = async (
 };
 
 /**
+ * Upscales an image using Gemini.
+ */
+export const upscaleImage = async (imageBase64: string, scale: number = 2): Promise<string> => {
+  try {
+     // For upscale, we send the original (or as large as feasible)
+     // Note: Gemini limits input tokens, so we might still need to cap it if it's huge,
+     // but the goal is to ask for a "high resolution" version.
+     const cleanData = cleanBase64(imageBase64);
+     
+     const prompt = `Upscale this image by approximately ${scale}x. Enhance fine details, remove noise, sharpness, and correct artifacts. Output a high-resolution, photorealistic image. Keep the content exactly the same, just improve quality.`;
+     
+     const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image', // Or pro-vision if available and better for details
+      contents: {
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: cleanData } },
+          { text: prompt }
+        ],
+      },
+    });
+
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData?.data) {
+        return `data:image/png;base64,${part.inlineData.data}`;
+      }
+    }
+    throw new Error("Upscale failed to generate image data");
+
+  } catch (error: any) {
+      console.error("Upscale Error:", error);
+      throw new Error("Upscaling failed. " + error.message);
+  }
+};
+
+/**
  * Generates a creative social media caption for an image.
  */
 export const generateSocialCaption = async (imageBase64: string, theme: string): Promise<string> => {
@@ -166,6 +201,55 @@ export const generateSocialCaption = async (imageBase64: string, theme: string):
   } catch (error) {
     console.error("Caption generation failed", error);
     return "Ready for the spotlight! ✨";
+  }
+};
+
+/**
+ * Generates a click-based caption with specific tone.
+ */
+export const generateClickCaption = async (cropBase64: string, tone: CaptionTone): Promise<{caption: string, subject: string}> => {
+  try {
+    const resizedCrop = await resizeImage(cropBase64, 400, 400); // Small crop for speed and focus
+    const cleanData = cleanBase64(resizedCrop);
+    
+    const prompt = `
+      Mission: Click-to-Caption Assistant.
+      Tone: ${tone.toUpperCase()}.
+      Analyze this image crop (which represents a user click area).
+      1. Infer salient subject (saree, jewelry, car, etc).
+      2. Generate 1-2 concise lines (<= 18 words).
+      3. Tone Rules:
+         - Funny: playful, witty, light humor, puns.
+         - Angry: mild frustration/snark at objects/situations (e.g. traffic, weather).
+         - NEVER mention blurred faces or PII.
+         - Clean, non-abusive.
+      
+      Output strictly valid JSON: { "caption": "string", "subject": "string" }
+    `;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: {
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: cleanData } },
+          { text: prompt }
+        ],
+      },
+    });
+    
+    const text = response.text?.trim() || "";
+    const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    
+    try {
+        const res = JSON.parse(jsonStr);
+        return { caption: res.caption || "Interesting spot!", subject: res.subject || "Scene" };
+    } catch (e) {
+        return { caption: text, subject: "Scene" };
+    }
+
+  } catch (error) {
+    console.error("Click Caption failed", error);
+    return { caption: "Could not caption this area.", subject: "Error" };
   }
 };
 
