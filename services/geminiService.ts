@@ -1,3 +1,4 @@
+
 import { GoogleGenAI } from "@google/genai";
 import { cleanBase64, invertMask, resizeImage } from "../utils/imageUtils";
 import { GlobalAnalysisResult } from "../types";
@@ -19,7 +20,8 @@ export const editImageWithGemini = async (
   prompt: string,
   maskImageBase64?: string,
   shouldInvertMask: boolean = false,
-  styleReferenceBase64?: string
+  styleReferenceBase64?: string,
+  styleFeatures: string[] = []
 ): Promise<string> => {
   try {
     // Resize main image
@@ -69,7 +71,14 @@ export const editImageWithGemini = async (
                 data: cleanStyle
             }
         });
-        fullPrompt += " A reference style image is provided (the last image). Analyze its colors, lighting, textures, and mood. Apply this visual style to the edited area of the primary image.";
+        
+        let styleInstruction = " A reference style image is provided (the last image).";
+        if (styleFeatures.length > 0) {
+            styleInstruction += ` Focus specifically on transferring these elements from the reference: ${styleFeatures.join(', ')}.`;
+        } else {
+            styleInstruction += " Analyze its colors, lighting, textures, and mood. Apply this visual style to the edited area of the primary image.";
+        }
+        fullPrompt += styleInstruction;
     }
     
     // CRITICAL: Explicitly forbid text/JSON output
@@ -131,6 +140,81 @@ export const editImageWithGemini = async (
         msg = "Server error or timeout. The image might be too large or complex. Try using a smaller image.";
     }
     throw new Error(msg);
+  }
+};
+
+/**
+ * Generates a creative social media caption for an image.
+ */
+export const generateSocialCaption = async (imageBase64: string, theme: string): Promise<string> => {
+  try {
+    const resizedImage = await resizeImage(imageBase64, ANALYSIS_DIMENSION, ANALYSIS_DIMENSION);
+    const cleanData = cleanBase64(resizedImage);
+    const prompt = `Write a short, engaging social media caption (Instagram/TikTok style) for this image. The image has been edited to have a "${theme}" vibe. Include emojis and 3 relevant hashtags. Keep it under 200 characters. Return ONLY the text.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: {
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: cleanData } },
+          { text: prompt }
+        ],
+      },
+    });
+    
+    return response.text?.trim() || "Just chilling! ✨ #vibes";
+  } catch (error) {
+    console.error("Caption generation failed", error);
+    return "Ready for the spotlight! ✨";
+  }
+};
+
+/**
+ * Generates a video from an image using Veo.
+ */
+export const generateVideoFromImage = async (imageBase64: string, prompt: string): Promise<string> => {
+  try {
+    // Veo prefers slightly lower res for speed/stability in preview
+    const resizedImage = await resizeImage(imageBase64, 1024, 576); // 16:9 roughly
+    const cleanData = cleanBase64(resizedImage);
+    
+    let operation = await ai.models.generateVideos({
+      model: 'veo-3.1-fast-generate-preview',
+      prompt: prompt || "Cinematic slow motion movement, high quality",
+      image: {
+        imageBytes: cleanData,
+        mimeType: 'image/png',
+      },
+      config: {
+        numberOfVideos: 1,
+        resolution: '720p',
+        aspectRatio: '16:9'
+      }
+    });
+
+    // Poll for completion
+    while (!operation.done) {
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Check every 5s
+      operation = await ai.operations.getVideosOperation({operation: operation});
+    }
+
+    if (operation.error) {
+       throw new Error(operation.error.message || "Video generation failed");
+    }
+
+    const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
+    if (!downloadLink) throw new Error("No video URI returned");
+
+    // Fetch the actual bytes
+    const response = await fetch(`${downloadLink}&key=${process.env.API_KEY}`);
+    if (!response.ok) throw new Error("Failed to download video bytes");
+    
+    const blob = await response.blob();
+    return URL.createObjectURL(blob);
+
+  } catch (error: any) {
+    console.error("Video Generation Error:", error);
+    throw new Error(error.message || "Failed to generate video");
   }
 };
 

@@ -36,7 +36,7 @@ export interface PromptSuggestion {
   icon?: any;
 }
 
-export type ExportFormat = 'png' | 'jpeg' | 'webp';
+export type ExportFormat = 'png' | 'jpeg' | 'webp' | 'mp4';
 
 export type ImageCategory = 'Human' | 'Vehicle' | 'Product' | 'Animal' | 'Landscape' | 'Other';
 
